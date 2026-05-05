@@ -1,0 +1,501 @@
+"""
+database.py — SQLite database manager
+Monthly rotating signal DB + persistent lifetime PNL + config storage
+
+Directory layout:
+  data/
+    config.db          ← watchlist, bot config, RSI history
+    lifetime.db        ← all closed trades across all months
+    signals_2025_01.db ← monthly signal tables (auto-created)
+    signals_2025_02.db
+    ...
+"""
+from __future__ import annotations
+import os
+import sqlite3
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
+
+
+# ─────────────────────────────────────────────────────────────
+#  Helpers
+# ─────────────────────────────────────────────────────────────
+def _conn(path: str) -> sqlite3.Connection:
+    c = sqlite3.connect(path, check_same_thread=False)
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA journal_mode=WAL")
+    return c
+
+
+# ─────────────────────────────────────────────────────────────
+#  DatabaseManager
+# ─────────────────────────────────────────────────────────────
+class DatabaseManager:
+    def __init__(self, db_dir: str = "data") -> None:
+        self.db_dir      = db_dir
+        os.makedirs(db_dir, exist_ok=True)
+        self.config_db   = os.path.join(db_dir, "config.db")
+        self.lifetime_db = os.path.join(db_dir, "lifetime.db")
+
+    # ── Path helpers ─────────────────────────────────────
+    def _monthly_path(self, year: int | None = None, month: int | None = None) -> str:
+        now = datetime.now()
+        y = year  or now.year
+        m = month or now.month
+        return os.path.join(self.db_dir, f"signals_{y:04d}_{m:02d}.db")
+
+    # ── Bootstrap ────────────────────────────────────────
+    def initialize(self) -> None:
+        self._init_config()
+        self._init_lifetime()
+        self._init_monthly()          # current month
+
+    def _init_config(self) -> None:
+        with _conn(self.config_db) as c:
+            c.executescript("""
+                CREATE TABLE IF NOT EXISTS config (
+                    key        TEXT PRIMARY KEY,
+                    value      TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS watchlist (
+                    symbol    TEXT PRIMARY KEY,
+                    active    INTEGER DEFAULT 1,
+                    added_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS rsi_history (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol     TEXT NOT NULL,
+                    timeframe  TEXT NOT NULL,
+                    rsi_value  REAL NOT NULL,
+                    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_rsi_sym_tf
+                    ON rsi_history(symbol, timeframe);
+            """)
+            defaults = {
+                "default_timeframe":   "15m",
+                "scan_interval":       "300",
+                "min_confidence":      "6",
+                "auto_scan":           "true",
+                "signal_expiry_hours": "4",
+                "notify_lean":         "false",
+                "leverage_suggestion": "5",
+                "risk_per_trade_pct":  "1",
+            }
+            c.executemany(
+                "INSERT OR IGNORE INTO config(key,value) VALUES(?,?)",
+                defaults.items(),
+            )
+
+    def _init_lifetime(self) -> None:
+        with _conn(self.lifetime_db) as c:
+            c.executescript("""
+                CREATE TABLE IF NOT EXISTS lifetime_signals (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    signal_id   INTEGER,
+                    month_table TEXT,
+                    symbol      TEXT,
+                    timeframe   TEXT,
+                    signal_type TEXT,
+                    confidence  INTEGER,
+                    entry_price REAL,
+                    exit_price  REAL,
+                    sl_price    REAL,
+                    tp1_price   REAL,
+                    tp2_price   REAL,
+                    tp3_price   REAL,
+                    pnl_pct     REAL,
+                    pnl_usdt    REAL DEFAULT 0,
+                    status      TEXT,
+                    created_at  TIMESTAMP,
+                    closed_at   TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_lt_symbol  ON lifetime_signals(symbol);
+                CREATE INDEX IF NOT EXISTS idx_lt_created ON lifetime_signals(created_at);
+                CREATE INDEX IF NOT EXISTS idx_lt_status  ON lifetime_signals(status);
+            """)
+
+    def _init_monthly(self, year: int | None = None, month: int | None = None) -> str:
+        path = self._monthly_path(year, month)
+        with _conn(path) as c:
+            c.executescript("""
+                CREATE TABLE IF NOT EXISTS signals (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol            TEXT NOT NULL,
+                    timeframe         TEXT NOT NULL,
+                    signal_type       TEXT NOT NULL,
+                    confidence        INTEGER,
+                    bull_score        REAL,
+                    bear_score        REAL,
+                    entry_price       REAL,
+                    current_price     REAL,
+                    sl_price          REAL,
+                    tp1_price         REAL,
+                    tp2_price         REAL,
+                    tp3_price         REAL,
+                    tp1_hit           INTEGER DEFAULT 0,
+                    tp2_hit           INTEGER DEFAULT 0,
+                    tp3_hit           INTEGER DEFAULT 0,
+                    rsi               REAL,
+                    macd_hist         REAL,
+                    adx               REAL,
+                    ema9              REAL,
+                    ema21             REAL,
+                    ema50             REAL,
+                    bb_position       REAL,
+                    volume_ratio      REAL,
+                    momentum          REAL,
+                    divergence        TEXT,
+                    funding_rate      REAL,
+                    atr               REAL,
+                    pnl_pct           REAL DEFAULT 0,
+                    pnl_usdt          REAL DEFAULT 0,
+                    status            TEXT DEFAULT 'OPEN',
+                    invalidated_reason TEXT,
+                    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    closed_at         TIMESTAMP,
+                    expires_at        TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_sig_sym    ON signals(symbol);
+                CREATE INDEX IF NOT EXISTS idx_sig_status ON signals(status);
+                CREATE INDEX IF NOT EXISTS idx_sig_create ON signals(created_at);
+            """)
+        return path
+
+    # ─────────────────────────────────────────────────────
+    #  Signal CRUD
+    # ─────────────────────────────────────────────────────
+    def save_signal(self, signal, expiry_hours: float = 4.0) -> int:
+        path = self._monthly_path()
+        expires = datetime.now() + timedelta(hours=expiry_hours)
+        with _conn(path) as c:
+            cur = c.execute("""
+                INSERT INTO signals (
+                    symbol, timeframe, signal_type, confidence,
+                    bull_score, bear_score, entry_price, current_price,
+                    sl_price, tp1_price, tp2_price, tp3_price,
+                    rsi, macd_hist, adx, ema9, ema21, ema50,
+                    bb_position, volume_ratio, momentum,
+                    divergence, funding_rate, atr, expires_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                signal.symbol, signal.timeframe, signal.signal_type, signal.confidence,
+                signal.bull_score, signal.bear_score,
+                signal.entry_price, signal.entry_price,
+                signal.sl_price, signal.tp1_price, signal.tp2_price, signal.tp3_price,
+                signal.rsi, signal.macd_hist, signal.adx,
+                signal.ema9, signal.ema21, signal.ema50,
+                signal.bb_position, signal.volume_ratio, signal.momentum,
+                signal.divergence, signal.funding_rate, signal.atr,
+                expires.isoformat(),
+            ))
+            return cur.lastrowid
+
+    def get_open_signals(self, year: int | None = None, month: int | None = None) -> List[Dict]:
+        path = self._monthly_path(year, month)
+        if not os.path.exists(path):
+            return []
+        with _conn(path) as c:
+            rows = c.execute(
+                "SELECT * FROM signals WHERE status='OPEN' ORDER BY created_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_signal_status(
+        self,
+        signal_id: int,
+        status: str,
+        current_price: float,
+        pnl_pct: float,
+        pnl_usdt: float = 0.0,
+        year: int | None = None,
+        month: int | None = None,
+    ) -> None:
+        path = self._monthly_path(year, month)
+        with _conn(path) as c:
+            c.execute("""
+                UPDATE signals
+                SET status=?, current_price=?, pnl_pct=?, pnl_usdt=?,
+                    closed_at=CURRENT_TIMESTAMP
+                WHERE id=?
+            """, (status, current_price, pnl_pct, pnl_usdt, signal_id))
+
+        if status not in ("OPEN",):
+            self._sync_to_lifetime(signal_id, year, month)
+
+    def mark_tp_hit(self, signal_id: int, tp_num: int,
+                    year: int | None = None, month: int | None = None) -> None:
+        """Mark TP1 or TP2 as hit without closing the position."""
+        col  = {1: "tp1_hit", 2: "tp2_hit", 3: "tp3_hit"}.get(tp_num)
+        path = self._monthly_path(year, month)
+        if col:
+            with _conn(path) as c:
+                c.execute(f"UPDATE signals SET {col}=1 WHERE id=?", (signal_id,))
+
+    def invalidate_signal(self, signal_id: int, reason: str,
+                          year: int | None = None, month: int | None = None) -> None:
+        path = self._monthly_path(year, month)
+        with _conn(path) as c:
+            c.execute("""
+                UPDATE signals
+                SET status='INVALIDATED', invalidated_reason=?,
+                    closed_at=CURRENT_TIMESTAMP
+                WHERE id=?
+            """, (reason, signal_id))
+        self._sync_to_lifetime(signal_id, year, month)
+
+    def _sync_to_lifetime(self, signal_id: int,
+                          year: int | None = None, month: int | None = None) -> None:
+        path    = self._monthly_path(year, month)
+        now     = datetime.now()
+        y, m    = year or now.year, month or now.month
+        tbl_key = f"signals_{y:04d}_{m:02d}"
+
+        with _conn(path) as c:
+            row = c.execute("SELECT * FROM signals WHERE id=?", (signal_id,)).fetchone()
+        if not row:
+            return
+        row = dict(row)
+
+        with _conn(self.lifetime_db) as c:
+            existing = c.execute(
+                "SELECT id FROM lifetime_signals WHERE signal_id=? AND month_table=?",
+                (signal_id, tbl_key),
+            ).fetchone()
+
+            if existing:
+                c.execute("""
+                    UPDATE lifetime_signals
+                    SET exit_price=?, pnl_pct=?, pnl_usdt=?, status=?, closed_at=?
+                    WHERE signal_id=? AND month_table=?
+                """, (
+                    row["current_price"], row["pnl_pct"], row["pnl_usdt"],
+                    row["status"], row["closed_at"],
+                    signal_id, tbl_key,
+                ))
+            else:
+                c.execute("""
+                    INSERT INTO lifetime_signals (
+                        signal_id, month_table, symbol, timeframe, signal_type,
+                        confidence, entry_price, exit_price, sl_price,
+                        tp1_price, tp2_price, tp3_price,
+                        pnl_pct, pnl_usdt, status, created_at, closed_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    signal_id, tbl_key,
+                    row["symbol"], row["timeframe"], row["signal_type"],
+                    row["confidence"], row["entry_price"], row["current_price"],
+                    row["sl_price"], row["tp1_price"], row["tp2_price"], row["tp3_price"],
+                    row["pnl_pct"], row["pnl_usdt"], row["status"],
+                    row["created_at"], row["closed_at"],
+                ))
+
+    # ─────────────────────────────────────────────────────
+    #  Statistics
+    # ─────────────────────────────────────────────────────
+    def _stats_query(self, path: str, where: str = "", params: tuple = ()) -> Dict:
+        if not os.path.exists(path):
+            return {}
+        with _conn(path) as c:
+            row = c.execute(f"""
+                SELECT
+                    COUNT(*)  AS total,
+                    SUM(CASE WHEN status IN ('TP1','TP2','TP3') THEN 1 ELSE 0 END) AS wins,
+                    SUM(CASE WHEN status='SL'      THEN 1 ELSE 0 END) AS losses,
+                    SUM(CASE WHEN status='EXPIRED' THEN 1 ELSE 0 END) AS expired,
+                    SUM(CASE WHEN status='OPEN'    THEN 1 ELSE 0 END) AS open_count,
+                    ROUND(SUM(CASE WHEN status NOT IN ('OPEN','EXPIRED')
+                                   THEN pnl_pct ELSE 0 END), 4)       AS total_pnl,
+                    ROUND(AVG(CASE WHEN status NOT IN ('OPEN','EXPIRED')
+                                   THEN pnl_pct END), 4)              AS avg_pnl,
+                    ROUND(MAX(pnl_pct), 4)                             AS best_trade,
+                    ROUND(MIN(CASE WHEN status NOT IN ('OPEN','EXPIRED')
+                                   THEN pnl_pct END), 4)              AS worst_trade,
+                    COUNT(DISTINCT symbol)                             AS symbols_traded
+                FROM signals
+                {where}
+            """, params).fetchone()
+        return dict(row) if row else {}
+
+    def get_daily_stats(self, date_str: str | None = None) -> Dict:
+        if not date_str:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+        return self._stats_query(
+            self._monthly_path(),
+            "WHERE DATE(created_at)=?",
+            (date_str,),
+        )
+
+    def get_weekly_stats(self) -> Dict:
+        return self._stats_query(
+            self._monthly_path(),
+            "WHERE created_at >= datetime('now','-7 days')",
+        )
+
+    def get_monthly_stats(self, year: int | None = None, month: int | None = None) -> Dict:
+        return self._stats_query(self._monthly_path(year, month))
+
+    def get_lifetime_stats(self, symbol: str | None = None) -> Dict:
+        if not os.path.exists(self.lifetime_db):
+            return {}
+        where  = "WHERE status NOT IN ('OPEN','EXPIRED')"
+        params: tuple = ()
+        if symbol:
+            where += " AND symbol=?"
+            params = (symbol,)
+        with _conn(self.lifetime_db) as c:
+            row = c.execute(f"""
+                SELECT
+                    COUNT(*)  AS total,
+                    SUM(CASE WHEN status IN ('TP1','TP2','TP3') THEN 1 ELSE 0 END) AS wins,
+                    SUM(CASE WHEN status='SL' THEN 1 ELSE 0 END) AS losses,
+                    ROUND(SUM(pnl_pct),4) AS total_pnl,
+                    ROUND(AVG(pnl_pct),4) AS avg_pnl,
+                    ROUND(MAX(pnl_pct),4) AS best_trade,
+                    ROUND(MIN(pnl_pct),4) AS worst_trade
+                FROM lifetime_signals {where}
+            """, params).fetchone()
+        return dict(row) if row else {}
+
+    def get_win_rate_by_symbol(self) -> List[Dict]:
+        if not os.path.exists(self.lifetime_db):
+            return []
+        with _conn(self.lifetime_db) as c:
+            rows = c.execute("""
+                SELECT
+                    symbol,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status IN ('TP1','TP2','TP3') THEN 1 ELSE 0 END) AS wins,
+                    SUM(CASE WHEN status='SL' THEN 1 ELSE 0 END) AS losses,
+                    ROUND(100.0*SUM(CASE WHEN status IN ('TP1','TP2','TP3')
+                                         THEN 1 ELSE 0 END)/COUNT(*), 1) AS win_rate,
+                    ROUND(SUM(pnl_pct),2) AS total_pnl
+                FROM lifetime_signals
+                WHERE status NOT IN ('OPEN','EXPIRED')
+                GROUP BY symbol
+                HAVING total >= 3
+                ORDER BY win_rate DESC, total DESC
+                LIMIT 20
+            """).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_recent_signals(self, limit: int = 10,
+                           year: int | None = None, month: int | None = None) -> List[Dict]:
+        path = self._monthly_path(year, month)
+        if not os.path.exists(path):
+            return []
+        with _conn(path) as c:
+            rows = c.execute("""
+                SELECT id, symbol, timeframe, signal_type, confidence,
+                       status, pnl_pct, created_at
+                FROM signals ORDER BY id DESC LIMIT ?
+            """, (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+    # ─────────────────────────────────────────────────────
+    #  Config
+    # ─────────────────────────────────────────────────────
+    def get_config(self, key: str, default: str | None = None) -> str | None:
+        with _conn(self.config_db) as c:
+            row = c.execute("SELECT value FROM config WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
+
+    def set_config(self, key: str, value: str) -> None:
+        with _conn(self.config_db) as c:
+            c.execute("""
+                INSERT OR REPLACE INTO config(key,value,updated_at)
+                VALUES(?,?,CURRENT_TIMESTAMP)
+            """, (key, value))
+
+    # ─────────────────────────────────────────────────────
+    #  Watchlist
+    # ─────────────────────────────────────────────────────
+    def get_watchlist(self, active_only: bool = True) -> List[str]:
+        q = "SELECT symbol FROM watchlist"
+        if active_only:
+            q += " WHERE active=1"
+        q += " ORDER BY symbol"
+        with _conn(self.config_db) as c:
+            return [r["symbol"] for r in c.execute(q).fetchall()]
+
+    def add_to_watchlist(self, symbol: str) -> None:
+        with _conn(self.config_db) as c:
+            c.execute(
+                "INSERT OR REPLACE INTO watchlist(symbol,active) VALUES(?,1)",
+                (symbol,),
+            )
+
+    def remove_from_watchlist(self, symbol: str) -> None:
+        with _conn(self.config_db) as c:
+            c.execute("UPDATE watchlist SET active=0 WHERE symbol=?", (symbol,))
+
+    # ─────────────────────────────────────────────────────
+    #  RSI history (for divergence detection)
+    # ─────────────────────────────────────────────────────
+    def save_rsi(self, symbol: str, timeframe: str, rsi: float) -> None:
+        with _conn(self.config_db) as c:
+            c.execute(
+                "INSERT INTO rsi_history(symbol,timeframe,rsi_value) VALUES(?,?,?)",
+                (symbol, timeframe, rsi),
+            )
+            # Keep only last 60 entries per symbol/timeframe
+            c.execute("""
+                DELETE FROM rsi_history
+                WHERE symbol=? AND timeframe=?
+                  AND id NOT IN (
+                      SELECT id FROM rsi_history
+                      WHERE symbol=? AND timeframe=?
+                      ORDER BY id DESC LIMIT 60
+                  )
+            """, (symbol, timeframe, symbol, timeframe))
+
+    def get_rsi_history(self, symbol: str, timeframe: str) -> List[float]:
+        with _conn(self.config_db) as c:
+            rows = c.execute("""
+                SELECT rsi_value FROM rsi_history
+                WHERE symbol=? AND timeframe=?
+                ORDER BY id DESC LIMIT 30
+            """, (symbol, timeframe)).fetchall()
+        return [r["rsi_value"] for r in reversed(rows)]
+
+    # ─────────────────────────────────────────────────────
+    #  DB discovery
+    # ─────────────────────────────────────────────────────
+    def get_available_months(self) -> List[str]:
+        months = []
+        for f in os.listdir(self.db_dir):
+            if f.startswith("signals_") and f.endswith(".db"):
+                months.append(f[8:-3])   # "YYYY_MM"
+        return sorted(months)
+
+    def ensure_month_db(self, year: int | None = None, month: int | None = None) -> str:
+        """Create monthly DB if it doesn't exist yet (called at month rollover)."""
+        return self._init_monthly(year, month)
+
+    # ─────────────────────────────────────────────────────
+    #  Expiry management
+    # ─────────────────────────────────────────────────────
+    def expire_old_signals(self) -> int:
+        """Mark timed-out OPEN signals as EXPIRED. Returns count."""
+        path = self._monthly_path()
+        if not os.path.exists(path):
+            return 0
+        with _conn(path) as c:
+            cur = c.execute("""
+                UPDATE signals
+                SET status='EXPIRED', closed_at=CURRENT_TIMESTAMP
+                WHERE status='OPEN' AND expires_at < CURRENT_TIMESTAMP
+            """)
+            count = cur.rowcount
+        # Sync all newly expired signals to lifetime
+        if count > 0:
+            with _conn(path) as c:
+                expired_ids = [
+                    r["id"] for r in c.execute(
+                        "SELECT id FROM signals WHERE status='EXPIRED' AND closed_at >= datetime('now','-1 minute')"
+                    ).fetchall()
+                ]
+            for sid in expired_ids:
+                self._sync_to_lifetime(sid)
+        return count

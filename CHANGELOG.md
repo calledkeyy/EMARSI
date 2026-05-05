@@ -7,6 +7,40 @@ dan proyek ini menggunakan [Semantic Versioning](https://semver.org/lang/id/).
 
 ---
 
+## [1.3.0] — 2026-05-06
+
+### Added — Fitur 3: Volume Anomaly Detector
+- `indicators.py` — `detect_volume_anomaly(volumes, closes, opens, period=20)`:
+  - Deteksi spike volume vs rata-rata 20 candle sebelumnya
+  - Strength: `extreme` (>5×), `high` (>3×), `moderate` (>2×), `normal`
+  - Type: `buying_pressure` / `selling_pressure` / `normal`
+  - CVD (Cumulative Volume Delta): `bullish` / `bearish` dari 10 candle terakhir
+  - Consecutive: jumlah candle berturut-turut dengan volume > 1.5× rata-rata
+- `signals.py` — scoring volume anomaly (step 5b, terpisah dari vol spike lama):
+  - Extreme pressure: ±3 poin
+  - High pressure: ±2 poin
+  - Moderate pressure: ±1 poin
+- `signals.py` — `SignalResult` tambah field `volume_anomaly: dict`
+- `reports.py` — signal message tampilkan baris volume:
+  `• Volume: 4.2x avg | 🔴 Extreme Selling | CVD: Bearish | 3 candles`
+- `reports.py` — `signal_message()` tambah parameter opsional `source_label`
+
+### Added — Fitur 4: Dynamic Top 30 Market Scan
+- `fetcher.py` — `get_top30_by_volume()`: top 30 USDT-M pair by 24h volume, stablecoin excluded
+- `database.py` — tabel `dynamic_watchlist` di `config.db` + 3 method baru:
+  - `save_dynamic_watchlist(symbols, fetched_at)` — replace all + insert dengan rank
+  - `get_dynamic_watchlist()` — return list symbol ORDER BY rank
+  - `get_dynamic_watchlist_age()` — menit sejak last fetch (9999 jika kosong)
+- `scheduler.py` — `_dynamic_scan_loop()`: loop baru paralel di `asyncio.gather`:
+  - Refresh top 30 setiap 00/04/08/12/16/20 UTC + fallback jika age > 240 menit
+  - Scan langsung setelah refresh, broadcast strong signals dengan label `[Top30 Scan]`
+  - Berjalan terpisah dari `_auto_scan_loop` user watchlist
+- `scheduler.py` — method publik `scan_top30(tf)` untuk trigger manual dari Telegram
+- `telegram_handler.py` — command `/topscan [TF]`: manual scan top 30, tampilkan summary + kirim sinyal kuat
+- `telegram_handler.py` — command `/toplist`: tampilkan daftar top 30 + waktu update terakhir & berikutnya
+
+---
+
 ## [1.2.0] — 2026-05-06
 
 ### Changed — Fixed Risk:Reward Take Profit

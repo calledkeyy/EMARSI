@@ -58,7 +58,9 @@ class ReportGenerator:
         self.db = db
 
     # ── Signal alert ─────────────────────────────────────
-    def signal_message(self, sig, signal_id: Optional[int] = None) -> str:
+    def signal_message(
+        self, sig, signal_id: Optional[int] = None, source_label: str = ""
+    ) -> str:
         st   = sig.signal_type
         icon = _SIGNAL_ICON.get(st, "⚪")
         ep   = sig.entry_price
@@ -140,8 +142,29 @@ class ReportGenerator:
                 f"{fr_tag}  {tr_icon} {sig.funding_trend}"
             )
 
+        # Source label (e.g. Top30 Scan)
+        src_line = f"🔍 *[{source_label}]*\n" if source_label else ""
+
+        # Volume anomaly line
+        va = sig.volume_anomaly or {}
+        if va.get("anomaly"):
+            _va_color = {"buying_pressure": "🟢", "selling_pressure": "🔴"}.get(
+                va.get("type", ""), "⚪"
+            )
+            _va_strength = va.get("strength", "").capitalize()
+            _va_dir      = "Buying" if va.get("type") == "buying_pressure" else "Selling"
+            _va_cvd      = va.get("cvd_trend", "").capitalize()
+            _va_consec   = va.get("consecutive", 0)
+            vol_display  = (
+                f"• Volume:     {va['ratio']:.1f}x avg | "
+                f"{_va_color} {_va_strength} {_va_dir} | "
+                f"CVD: {_va_cvd} | {_va_consec} candles"
+            )
+        else:
+            vol_display = f"• Volume:     {sig.volume_ratio:.2f}x avg"
+
         return (
-            f"{icon} *{sig.symbol}  {sig.timeframe}  —  {st}*\n"
+            f"{src_line}{icon} *{sig.symbol}  {sig.timeframe}  —  {st}*\n"
             f"{'─'*34}\n"
             f"🎯 Confidence: {_conf_bar(sig.confidence)}\n"
             f"⚖️  Score: Bull {sig.bull_score:.1f}  Bear {sig.bear_score:.1f}"
@@ -158,7 +181,7 @@ class ReportGenerator:
             f"• ADX:        {sig.adx:.1f}  {adx_lbl}\n"
             f"• BB Pos:     {sig.bb_position:.2f}  ({bb_lbl})\n"
             f"• EMA 9/21/50: {ema_lbl}\n"
-            f"• Volume:     {sig.volume_ratio:.2f}x avg\n"
+            f"{vol_display}\n"
             f"• Momentum:   {sig.momentum:+.2f}%\n"
             f"• ATR:        {_fmt_price(sig.atr)}"
             f"{oi_line}"

@@ -5,7 +5,7 @@ All /commands and inline callbacks
 from __future__ import annotations
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from telegram import (
@@ -69,6 +69,8 @@ class TelegramBot:
             ("resume",      self.cmd_resume),
             ("close",       self.cmd_close),
             ("history",     self.cmd_history),
+            ("topscan",     self.cmd_topscan),
+            ("toplist",     self.cmd_toplist),
         ]
         for name, handler in cmds:
             self.app.add_handler(CommandHandler(name, handler))
@@ -552,6 +554,92 @@ class TelegramBot:
             )
 
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    # ─────────────────────────────────────────────────────
+    #  /topscan
+    # ─────────────────────────────────────────────────────
+    async def cmd_topscan(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._ok(update): return
+
+        tf = (ctx.args[0].lower() if ctx.args
+              else self.db.get_config("default_timeframe", "15m"))
+
+        if tf not in VALID_TIMEFRAMES:
+            await update.message.reply_text(
+                f"❌ Invalid timeframe: `{tf}`\nValid: {', '.join(VALID_TIMEFRAMES)}",
+                parse_mode="Markdown",
+            )
+            return
+
+        symbols = self.db.get_dynamic_watchlist()
+        if not symbols:
+            await update.message.reply_text(
+                "⚠️ Top 30 list belum tersedia.\n"
+                "Bot akan mengambil data otomatis. Coba lagi dalam 1 menit."
+            )
+            return
+
+        loading = await update.message.reply_text(
+            f"🔍 Scanning *Top 30* on *{tf}*…", parse_mode="Markdown"
+        )
+        results = await self.scheduler.scan_top30(tf)
+        summary = self.reports.scan_summary(results, tf)
+        await loading.edit_text(summary, parse_mode="Markdown")
+
+        chat_id  = update.effective_chat.id
+        min_conf = int(self.db.get_config("min_confidence", "6"))
+        strong   = [
+            s for s in results
+            if s.signal_type in ("LONG", "SHORT") and s.confidence >= min_conf
+        ]
+        for sig in sorted(strong, key=lambda x: x.confidence, reverse=True)[:5]:
+            msg = self.reports.signal_message(sig, source_label="Top30 Scan")
+            await self._send(chat_id, msg)
+            await asyncio.sleep(0.5)
+
+    # ─────────────────────────────────────────────────────
+    #  /toplist
+    # ─────────────────────────────────────────────────────
+    async def cmd_toplist(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._ok(update): return
+
+        symbols = self.db.get_dynamic_watchlist()
+        age     = self.db.get_dynamic_watchlist_age()
+
+        if not symbols:
+            await update.message.reply_text(
+                "⚠️ Top 30 list belum tersedia.\n"
+                "Bot akan fetch otomatis pada jam 00/04/08/12/16/20 UTC.\n"
+                "Atau gunakan /topscan untuk trigger manual."
+            )
+            return
+
+        now_utc      = datetime.utcnow()
+        last_updated = now_utc - timedelta(minutes=age)
+
+        # Next refresh hour: 00, 04, 08, 12, 16, 20 UTC
+        _schedule = [0, 4, 8, 12, 16, 20]
+        future    = [h for h in _schedule if h > now_utc.hour]
+        if future:
+            next_update = now_utc.replace(
+                hour=future[0], minute=0, second=0, microsecond=0
+            )
+        else:
+            next_update = (now_utc + timedelta(days=1)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+
+        numbered = "\n".join(f"{i:2}. `{sym}`" for i, sym in enumerate(symbols, 1))
+
+        await update.message.reply_text(
+            f"⚡ *Dynamic Top 30 — Binance Futures*\n"
+            f"{'━'*32}\n"
+            f"🕐 Last updated: {last_updated:%Y-%m-%d %H:%M} UTC\n"
+            f"🔄 Next update : {next_update:%Y-%m-%d %H:%M} UTC\n\n"
+            f"{numbered}\n\n"
+            f"_Gunakan /topscan untuk scan sekarang_",
+            parse_mode="Markdown",
+        )
 
     # ─────────────────────────────────────────────────────
     #  Callback handler

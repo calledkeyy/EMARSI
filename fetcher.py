@@ -135,6 +135,33 @@ class BinanceFetcher:
             return []
 
     # ─────────────────────────────────────────────────────
+    #  Dynamic Top 30  (excludes stablecoins)
+    # ─────────────────────────────────────────────────────
+    _STABLECOIN_PAIRS = frozenset({
+        "BUSDUSDT", "USDCUSDT", "TUSDUSDT", "USDPUSDT", "FDUSDUSDT",
+    })
+
+    async def get_top30_by_volume(self) -> List[str]:
+        """Top 30 USDT-M pairs by 24h quote volume, stablecoins excluded."""
+        session = await self._get_session()
+        url     = f"{BINANCE_FUTURES_BASE}/fapi/v1/ticker/24hr"
+        try:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+            usdt = [
+                d for d in data
+                if d["symbol"].endswith("USDT")
+                and d["symbol"] not in self._STABLECOIN_PAIRS
+            ]
+            usdt.sort(key=lambda x: float(x["quoteVolume"]), reverse=True)
+            return [p["symbol"] for p in usdt[:30]]
+        except Exception as e:
+            logger.error("get_top30_by_volume: %s", e)
+            return []
+
+    # ─────────────────────────────────────────────────────
     #  Fear & Greed Index  (alternative.me)
     # ─────────────────────────────────────────────────────
     async def get_fear_greed(self) -> Dict[str, str]:

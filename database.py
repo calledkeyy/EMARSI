@@ -72,6 +72,12 @@ class DatabaseManager:
                 );
                 CREATE INDEX IF NOT EXISTS idx_rsi_sym_tf
                     ON rsi_history(symbol, timeframe);
+                CREATE TABLE IF NOT EXISTS dynamic_watchlist (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol     TEXT NOT NULL,
+                    rank       INTEGER,
+                    fetched_at TIMESTAMP
+                );
             """)
             defaults = {
                 "default_timeframe":   "15m",
@@ -472,6 +478,41 @@ class DatabaseManager:
     def ensure_month_db(self, year: int | None = None, month: int | None = None) -> str:
         """Create monthly DB if it doesn't exist yet (called at month rollover)."""
         return self._init_monthly(year, month)
+
+    # ─────────────────────────────────────────────────────
+    #  Dynamic Watchlist  (Top 30 by volume, refreshed 6×/day)
+    # ─────────────────────────────────────────────────────
+    def save_dynamic_watchlist(
+        self, symbols: List[str], fetched_at: datetime | None = None
+    ) -> None:
+        ts = (fetched_at or datetime.now()).isoformat()
+        with _conn(self.config_db) as c:
+            c.execute("DELETE FROM dynamic_watchlist")
+            c.executemany(
+                "INSERT INTO dynamic_watchlist(symbol, rank, fetched_at) VALUES(?,?,?)",
+                [(sym, rank + 1, ts) for rank, sym in enumerate(symbols)],
+            )
+
+    def get_dynamic_watchlist(self) -> List[str]:
+        with _conn(self.config_db) as c:
+            rows = c.execute(
+                "SELECT symbol FROM dynamic_watchlist ORDER BY rank ASC"
+            ).fetchall()
+        return [r["symbol"] for r in rows]
+
+    def get_dynamic_watchlist_age(self) -> int:
+        """Minutes since last fetch. Returns 9999 if table is empty."""
+        with _conn(self.config_db) as c:
+            row = c.execute(
+                "SELECT fetched_at FROM dynamic_watchlist ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        if not row or not row["fetched_at"]:
+            return 9999
+        try:
+            fetched = datetime.fromisoformat(row["fetched_at"])
+            return int((datetime.now() - fetched).total_seconds() / 60)
+        except Exception:
+            return 9999
 
     # ─────────────────────────────────────────────────────
     #  Expiry management

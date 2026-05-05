@@ -5,12 +5,13 @@ scheduler.py — Background task scheduler
 • Scheduled daily / weekly / monthly report broadcast
 • Signal expiry checker
 • Month-rollover DB creation
+• Dynamic Top 30 scan (refreshed every 4 hours at 00/04/08/12/16/20 UTC)
 """
 from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from database import DatabaseManager
 from fetcher import BinanceFetcher
@@ -31,6 +32,7 @@ class BotScheduler:
         self.reports  = ReportGenerator(db)
         self.bot: Optional["TelegramBot"] = None   # injected after init
         self._running = False
+        self._last_top30_key = ""  # "YYYYMMDDH" — prevents double-fire in same hour
 
     async def start(self) -> None:
         self._running = True
@@ -39,6 +41,7 @@ class BotScheduler:
             self._price_monitor_loop(),
             self._report_schedule_loop(),
             self._expiry_loop(),
+            self._dynamic_scan_loop(),
             return_exceptions=True,
         )
 
@@ -286,7 +289,97 @@ class BotScheduler:
                 await asyncio.sleep(60)
 
     # ─────────────────────────────────────────────────────
-    #  Public — called from Telegram /scan command
+    #  Dynamic Top 30 scan loop
+    # ─────────────────────────────────────────────────────
+    async def _dynamic_scan_loop(self) -> None:
+        while self._running:
+            try:
+                await self._refresh_and_scan_top30()
+                await asyncio.sleep(60)   # check every minute
+            except Exception as e:
+                logger.exception("Dynamic scan loop error: %s", e)
+                await asyncio.sleep(60)
+
+    async def _refresh_and_scan_top30(self) -> None:
+        now_utc = datetime.utcnow()
+        age     = self.db.get_dynamic_watchlist_age()
+
+        # Schedule: 00, 04, 08, 12, 16, 20 UTC — or fallback if age > 4h
+        on_schedule = (now_utc.hour % 4 == 0 and now_utc.minute == 0)
+        hour_key    = f"{now_utc.strftime('%Y%m%d')}{now_utc.hour}"
+        fresh_fire  = on_schedule and hour_key != self._last_top30_key
+        stale       = age > 240   # >4 h — missed a schedule or first boot
+
+        if not (fresh_fire or stale):
+            return
+
+        symbols = await self.fetcher.get_top30_by_volume()
+        if not symbols:
+            logger.warning("Top30 fetch returned empty list — skipping refresh")
+            return
+
+        self.db.save_dynamic_watchlist(symbols)
+        self._last_top30_key = hour_key
+        logger.info("Top30 refreshed (%d symbols), starting scan…", len(symbols))
+        await self._scan_top30()
+
+    async def _scan_top30(self, tf: Optional[str] = None) -> List:
+        symbols  = self.db.get_dynamic_watchlist()
+        if not symbols:
+            return []
+
+        tf       = tf or self.db.get_config("default_timeframe", "15m")
+        min_conf = int(self.db.get_config("min_confidence", "6"))
+        expiry_h = float(self.db.get_config("signal_expiry_hours", "4"))
+        results  = []
+
+        logger.info("Top30 scan: %d symbols on %s", len(symbols), tf)
+
+        for symbol in symbols:
+            try:
+                klines = await self.fetcher.get_klines(symbol, tf, 200)
+                if not klines:
+                    continue
+
+                funding, oi_hist, fund_hist = await asyncio.gather(
+                    self.fetcher.get_funding_rate(symbol),
+                    self.fetcher.get_oi_history(symbol),
+                    self.fetcher.get_funding_rate_history(symbol),
+                )
+                rsi_hist = self.db.get_rsi_history(symbol, tf)
+
+                sig = calculate_signal(
+                    symbol=symbol, timeframe=tf,
+                    opens=klines["opens"], highs=klines["highs"],
+                    lows=klines["lows"],   closes=klines["closes"],
+                    volumes=klines["volumes"],
+                    funding_rate=funding, rsi_history=rsi_hist,
+                    oi_history=oi_hist, funding_history=fund_hist,
+                )
+                self.db.save_rsi(symbol, tf, sig.rsi)
+                results.append(sig)
+
+                if sig.signal_type in ("LONG", "SHORT") and sig.confidence >= min_conf:
+                    sid = self.db.save_signal(sig, expiry_h)
+                    if self.bot:
+                        msg = self.reports.signal_message(
+                            sig, sid, source_label="Top30 Scan"
+                        )
+                        await self.bot.broadcast_text(msg)
+
+                await asyncio.sleep(0.15)
+
+            except Exception as e:
+                logger.error("Top30 scan error %s: %s", symbol, e)
+
+        logger.info("Top30 scan done: %d results", len(results))
+        return results
+
+    # ─────────────────────────────────────────────────────
+    #  Public — called from Telegram commands
     # ─────────────────────────────────────────────────────
     async def manual_scan(self, tf: Optional[str] = None) -> list:
         return await self._run_full_scan(tf)
+
+    async def scan_top30(self, tf: Optional[str] = None) -> List:
+        return await self._scan_top30(tf)

@@ -326,3 +326,80 @@ def calculate_funding_trend(funding_history: List[Dict]) -> str:
     if delta < -0.0001:
         return "falling"
     return "stable"
+
+
+# ─────────────────────────────────────────────────────────────
+#  Volume Anomaly Detector
+# ─────────────────────────────────────────────────────────────
+def detect_volume_anomaly(
+    volumes: np.ndarray,
+    closes: np.ndarray,
+    opens: np.ndarray,
+    period: int = 20,
+) -> Dict:
+    """
+    Detect abnormal volume spikes and classify buying/selling pressure.
+
+    Returns:
+        anomaly      — True if ratio > 2×
+        type         — "buying_pressure" | "selling_pressure" | "normal"
+        strength     — "extreme" (>5×) | "high" (>3×) | "moderate" (>2×) | "normal"
+        ratio        — current vol / avg vol
+        consecutive  — candles in a row (from latest) with vol > 1.5× avg
+        cvd_trend    — "bullish" | "bearish"  (last-10-candle Cumulative Volume Delta)
+    """
+    _default = {
+        "anomaly": False, "type": "normal", "strength": "normal",
+        "ratio": 1.0, "consecutive": 0, "cvd_trend": "bullish",
+    }
+    if len(volumes) < period + 1:
+        return _default
+
+    avg_vol = float(np.mean(volumes[-(period + 1):-1]))
+    if avg_vol == 0:
+        return _default
+
+    current_vol = float(volumes[-1])
+    ratio = round(current_vol / avg_vol, 3)
+
+    # Strength & anomaly flag
+    if ratio > 5:
+        strength, anomaly = "extreme", True
+    elif ratio > 3:
+        strength, anomaly = "high", True
+    elif ratio > 2:
+        strength, anomaly = "moderate", True
+    else:
+        strength, anomaly = "normal", False
+
+    # Type — direction of the anomaly candle
+    is_green = float(closes[-1]) > float(opens[-1])
+    vol_type = ("buying_pressure" if is_green else "selling_pressure") if anomaly else "normal"
+
+    # CVD — last 10 candles
+    n = min(10, len(volumes))
+    buy_vol = sell_vol = 0.0
+    for i in range(-n, 0):
+        v = float(volumes[i])
+        if float(closes[i]) > float(opens[i]):
+            buy_vol  += v
+        else:
+            sell_vol += v
+    cvd_trend = "bullish" if buy_vol >= sell_vol else "bearish"
+
+    # Consecutive candles with vol > 1.5× avg (from latest, going back)
+    consecutive = 0
+    for i in range(-1, -len(volumes), -1):
+        if float(volumes[i]) > 1.5 * avg_vol:
+            consecutive += 1
+        else:
+            break
+
+    return {
+        "anomaly":     anomaly,
+        "type":        vol_type,
+        "strength":    strength,
+        "ratio":       ratio,
+        "consecutive": consecutive,
+        "cvd_trend":   cvd_trend,
+    }

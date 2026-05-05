@@ -12,6 +12,7 @@ from indicators import (
     calculate_emas, calculate_volume_ratio, calculate_momentum,
     calculate_adx, calculate_atr, detect_divergence,
     calculate_oi_change, calculate_funding_trend,
+    detect_volume_anomaly,
 )
 
 
@@ -63,6 +64,7 @@ class SignalResult:
 
     atr: float
 
+    volume_anomaly: dict  = field(default_factory=dict)
     score_breakdown: dict = field(default_factory=dict)
 
 
@@ -105,6 +107,9 @@ def calculate_signal(
 
     # Funding trend
     funding_trend = calculate_funding_trend(funding_history or [])
+
+    # Volume anomaly
+    vol_anom = detect_volume_anomaly(volumes, closes, opens)
 
     is_green = float(closes[-1]) > float(opens[-1])
 
@@ -154,6 +159,18 @@ def calculate_signal(
             bear_score += 1; breakdown["vol"] = ("BEAR", 1)
     else:
         breakdown["vol"] = ("NEUTRAL", 0)
+
+    # 5b) Volume anomaly — additional pressure scoring
+    if vol_anom["anomaly"]:
+        s = vol_anom["strength"]
+        if vol_anom["type"] == "buying_pressure":
+            pts = 3 if s == "extreme" else 2 if s == "high" else 1
+            bull_score += pts; breakdown["vol_anom"] = (f"BUY_{s.upper()}", pts)
+        else:
+            pts = 3 if s == "extreme" else 2 if s == "high" else 1
+            bear_score += pts; breakdown["vol_anom"] = (f"SELL_{s.upper()}", pts)
+    else:
+        breakdown["vol_anom"] = ("NORMAL", 0)
 
     # 6) Momentum
     if   momentum > 2:
@@ -301,5 +318,5 @@ def calculate_signal(
         funding_rate=funding_rate, funding_warning=funding_warning,
         funding_level=funding_level, funding_trend=funding_trend,
         oi_change_1h=oi_change_1h, oi_trend=oi_trend, oi_signal=oi_signal,
-        atr=a, score_breakdown=breakdown,
+        atr=a, volume_anomaly=vol_anom, score_breakdown=breakdown,
     )

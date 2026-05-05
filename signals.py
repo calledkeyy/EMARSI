@@ -11,6 +11,7 @@ from indicators import (
     calculate_rsi, calculate_macd, calculate_bollinger,
     calculate_emas, calculate_volume_ratio, calculate_momentum,
     calculate_adx, calculate_atr, detect_divergence,
+    calculate_oi_change, calculate_funding_trend,
 )
 
 
@@ -50,8 +51,16 @@ class SignalResult:
     volume_ratio: float
     momentum: float
     divergence: str
+
     funding_rate: float
     funding_warning: bool
+    funding_level: str      # "ok" | "warn" | "strong_warn"
+    funding_trend: str      # "rising" | "falling" | "stable"
+
+    oi_change_1h: float     # % OI change over last 1h
+    oi_trend: str           # "rising" | "falling" | "flat"
+    oi_signal: str          # "bullish" | "bearish" | "weak_bullish" | "weak_bearish" | "neutral"
+
     atr: float
 
     score_breakdown: dict = field(default_factory=dict)
@@ -70,6 +79,8 @@ def calculate_signal(
     volumes: np.ndarray,
     funding_rate: float = 0.0,
     rsi_history: Optional[list[float]] = None,
+    oi_history: Optional[list] = None,
+    funding_history: Optional[list] = None,
 ) -> SignalResult:
 
     # ── Calculate all indicators ──────────────────────────
@@ -85,6 +96,15 @@ def calculate_signal(
     divergence = "none"
     if rsi_history and len(rsi_history) >= 10:
         divergence = detect_divergence(closes, rsi_history)
+
+    # OI analysis — use momentum as price-direction proxy
+    oi_raw     = calculate_oi_change(oi_history or [], price_change_pct=momentum)
+    oi_change_1h = oi_raw["oi_change_1h"]
+    oi_trend     = oi_raw["oi_trend"]
+    oi_signal    = oi_raw["signal"]
+
+    # Funding trend
+    funding_trend = calculate_funding_trend(funding_history or [])
 
     is_green = float(closes[-1]) > float(opens[-1])
 
@@ -167,17 +187,56 @@ def calculate_signal(
     else:
         breakdown["div"] = ("NONE", 0)
 
-    # 9) Funding-rate adjustment (Futures)
+    # 9) Open Interest scoring
+    if   oi_signal == "bullish":
+        bull_score += 2; breakdown["oi"] = ("BULL_OI", 2)
+    elif oi_signal == "bearish":
+        bear_score += 2; breakdown["oi"] = ("BEAR_OI", 2)
+    elif oi_signal == "weak_bullish":
+        bull_score += 1; breakdown["oi"] = ("WEAK_BULL_OI", 1)
+    elif oi_signal == "weak_bearish":
+        bear_score += 1; breakdown["oi"] = ("WEAK_BEAR_OI", 1)
+    else:
+        breakdown["oi"] = ("NEUTRAL", 0)
+
+    # 10) Funding-rate adjustment — agresif (check after OI so final direction is stable)
     funding_warning = False
-    if abs(funding_rate) > 0.001:          # > 0.1%
-        if funding_rate > 0 and bull_score > bear_score:
-            bull_score = max(bull_score - 1, 0)
+    funding_level   = "ok"
+
+    if bull_score > bear_score:        # leaning LONG
+        if funding_rate > 0.002:       # > +0.2%  strong warn
+            bull_score = max(bull_score - 3, 0)
             funding_warning = True
-            breakdown["funding"] = ("WARN_LONG", -1)
-        elif funding_rate < 0 and bear_score > bull_score:
-            bear_score = max(bear_score - 1, 0)
+            funding_level   = "strong_warn"
+            breakdown["funding"] = ("STRONG_WARN_LONG", -3)
+        elif funding_rate > 0.001:     # > +0.1%  warn
+            bull_score = max(bull_score - 2, 0)
             funding_warning = True
-            breakdown["funding"] = ("WARN_SHORT", -1)
+            funding_level   = "warn"
+            breakdown["funding"] = ("WARN_LONG", -2)
+        elif funding_rate < -0.001:    # < -0.1%  kontra → bonus
+            bull_score += 1
+            breakdown["funding"] = ("CONTRA_LONG", 1)
+        else:
+            breakdown["funding"] = ("OK", 0)
+
+    elif bear_score > bull_score:      # leaning SHORT
+        if funding_rate < -0.002:      # < -0.2%  strong warn
+            bear_score = max(bear_score - 3, 0)
+            funding_warning = True
+            funding_level   = "strong_warn"
+            breakdown["funding"] = ("STRONG_WARN_SHORT", -3)
+        elif funding_rate < -0.001:    # < -0.1%  warn
+            bear_score = max(bear_score - 2, 0)
+            funding_warning = True
+            funding_level   = "warn"
+            breakdown["funding"] = ("WARN_SHORT", -2)
+        elif funding_rate > 0.001:     # > +0.1%  kontra → bonus
+            bear_score += 1
+            breakdown["funding"] = ("CONTRA_SHORT", 1)
+        else:
+            breakdown["funding"] = ("OK", 0)
+
     else:
         breakdown["funding"] = ("OK", 0)
 
@@ -236,6 +295,9 @@ def calculate_signal(
         ema9=ema9, ema21=ema21, ema50=ema50,
         bb_upper=bb_up, bb_middle=bb_mid, bb_lower=bb_lo, bb_position=bb_pos,
         volume_ratio=vol_ratio, momentum=momentum,
-        divergence=divergence, funding_rate=funding_rate, funding_warning=funding_warning,
+        divergence=divergence,
+        funding_rate=funding_rate, funding_warning=funding_warning,
+        funding_level=funding_level, funding_trend=funding_trend,
+        oi_change_1h=oi_change_1h, oi_trend=oi_trend, oi_signal=oi_signal,
         atr=a, score_breakdown=breakdown,
     )

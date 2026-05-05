@@ -153,6 +153,71 @@ class BinanceFetcher:
             return {"value": "N/A", "label": "Unknown"}
 
     # ─────────────────────────────────────────────────────
+    #  Open Interest  (current + 1-hour history)
+    # ─────────────────────────────────────────────────────
+    async def get_open_interest(self, symbol: str) -> float:
+        session = await self._get_session()
+        url     = f"{BINANCE_FUTURES_BASE}/fapi/v1/openInterest"
+        try:
+            async with session.get(url, params={"symbol": symbol}) as resp:
+                if resp.status != 200:
+                    return 0.0
+                data = await resp.json()
+                return float(data.get("openInterest", 0))
+        except Exception as e:
+            logger.debug("get_open_interest %s: %s", symbol, e)
+            return 0.0
+
+    async def get_oi_history(
+        self, symbol: str, period: str = "5m", limit: int = 12
+    ) -> List[Dict]:
+        """12 × 5m = 1 hour of OI data, oldest → newest."""
+        session = await self._get_session()
+        url     = f"{BINANCE_FUTURES_BASE}/futures/data/openInterestHist"
+        params  = {"symbol": symbol, "period": period, "limit": limit}
+        try:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                return [
+                    {
+                        "timestamp":       d["timestamp"],
+                        "sumOpenInterest": float(d["sumOpenInterest"]),
+                    }
+                    for d in data
+                ]
+        except Exception as e:
+            logger.debug("get_oi_history %s: %s", symbol, e)
+            return []
+
+    # ─────────────────────────────────────────────────────
+    #  Funding Rate history  (trend analysis)
+    # ─────────────────────────────────────────────────────
+    async def get_funding_rate_history(
+        self, symbol: str, limit: int = 8
+    ) -> List[Dict]:
+        """Last N funding records (oldest → newest) for trend detection."""
+        session = await self._get_session()
+        url     = f"{BINANCE_FUTURES_BASE}/fapi/v1/fundingRate"
+        params  = {"symbol": symbol, "limit": limit}
+        try:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                return [
+                    {
+                        "fundingTime": d["fundingTime"],
+                        "fundingRate": float(d["fundingRate"]),
+                    }
+                    for d in data
+                ]
+        except Exception as e:
+            logger.debug("get_funding_rate_history %s: %s", symbol, e)
+            return []
+
+    # ─────────────────────────────────────────────────────
     #  All prices in one call  (for batch monitoring)
     # ─────────────────────────────────────────────────────
     async def get_all_prices(self) -> Dict[str, float]:

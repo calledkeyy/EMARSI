@@ -1,11 +1,12 @@
 """
 indicators.py — All technical indicator calculations
 RSI, MACD, Bollinger Bands, EMA, Volume Ratio,
-Momentum, ADX, ATR, Divergence detection
+Momentum, ADX, ATR, Divergence detection,
+Open Interest analysis, Funding Rate trend
 """
 from __future__ import annotations
 import numpy as np
-from typing import Tuple
+from typing import Tuple, Dict, List
 
 
 # ─────────────────────────────────────────────────────────────
@@ -242,3 +243,86 @@ def detect_divergence(
             return "bearish"
 
     return "none"
+
+
+# ─────────────────────────────────────────────────────────────
+#  Open Interest Analysis
+# ─────────────────────────────────────────────────────────────
+def calculate_oi_change(
+    oi_history: List[Dict],
+    price_change_pct: float = 0.0,
+) -> Dict:
+    """
+    Analyse 1-hour OI history.
+    price_change_pct: % change in price over the same window (pass momentum).
+
+    Returns:
+        oi_current    — latest OI value
+        oi_change_1h  — % change from oldest to newest bucket
+        oi_trend      — "rising" | "falling" | "flat"
+        signal        — "bullish" | "bearish" | "weak_bullish" | "weak_bearish" | "neutral"
+
+    Signal logic (threshold: |oi_change_1h| > 2%):
+        OI ↑ + price ↑ → bullish  (new longs entering)
+        OI ↑ + price ↓ → bearish  (new shorts entering)
+        OI ↓ + price ↑ → weak_bullish  (short covering)
+        OI ↓ + price ↓ → weak_bearish  (long liquidation)
+    """
+    if not oi_history or len(oi_history) < 2:
+        return {
+            "oi_current":   0.0,
+            "oi_change_1h": 0.0,
+            "oi_trend":     "flat",
+            "signal":       "neutral",
+        }
+
+    vals       = [h["sumOpenInterest"] for h in oi_history]
+    oi_current = vals[-1]
+    oi_old     = vals[0]
+
+    oi_change_1h = ((oi_current - oi_old) / oi_old * 100) if oi_old > 0 else 0.0
+
+    if abs(oi_change_1h) < 0.5:
+        oi_trend = "flat"
+    elif oi_change_1h > 0:
+        oi_trend = "rising"
+    else:
+        oi_trend = "falling"
+
+    signal = "neutral"
+    if abs(oi_change_1h) >= 2.0:
+        oi_up   = oi_trend == "rising"
+        oi_down = oi_trend == "falling"
+        px_up   = price_change_pct > 0
+        px_down = price_change_pct < 0
+
+        if   oi_up   and px_up:   signal = "bullish"
+        elif oi_up   and px_down: signal = "bearish"
+        elif oi_down and px_up:   signal = "weak_bullish"
+        elif oi_down and px_down: signal = "weak_bearish"
+
+    return {
+        "oi_current":   round(oi_current, 2),
+        "oi_change_1h": round(oi_change_1h, 3),
+        "oi_trend":     oi_trend,
+        "signal":       signal,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+#  Funding Rate Trend
+# ─────────────────────────────────────────────────────────────
+def calculate_funding_trend(funding_history: List[Dict]) -> str:
+    """
+    Determine funding rate trend from historical records (oldest → newest).
+    Returns "rising" | "falling" | "stable".
+    """
+    if len(funding_history) < 2:
+        return "stable"
+    rates = [h["fundingRate"] for h in funding_history]
+    delta = rates[-1] - rates[0]
+    if delta > 0.0001:
+        return "rising"
+    if delta < -0.0001:
+        return "falling"
+    return "stable"

@@ -105,11 +105,40 @@ class ReportGenerator:
         elif sig.divergence == "bearish":
             div_line = "\n⚡ *Bearish Divergence Detected!*"
 
-        # Funding warning
+        # OI section
+        oi_line = ""
+        if sig.oi_change_1h != 0.0 or sig.oi_trend != "flat":
+            _oi_trend_icon = {"rising": "📈", "falling": "📉", "flat": "➡️"}
+            _oi_sig_text = {
+                "bullish":      "Bullish",
+                "bearish":      "Bearish",
+                "weak_bullish": "Weak Bullish",
+                "weak_bearish": "Weak Bearish",
+                "neutral":      "Neutral",
+            }
+            t_icon   = _oi_trend_icon.get(sig.oi_trend, "➡️")
+            sig_text = _oi_sig_text.get(sig.oi_signal, "Neutral")
+            sign     = "+" if sig.oi_change_1h >= 0 else ""
+            oi_line  = f"\n• OI (1h):    {sign}{sig.oi_change_1h:.2f}%  {t_icon} {sig_text}"
+
+        # Funding rate section — agresif
         fr_line = ""
-        if abs(sig.funding_rate) > 0.001:
-            fr_emoji = "⚠️" if sig.funding_warning else "ℹ️"
-            fr_line  = f"\n{fr_emoji} Funding Rate: {sig.funding_rate * 100:.4f}%"
+        if abs(sig.funding_rate) > 0.0001:
+            _fr_trend_icon = {"rising": "📈", "falling": "📉", "stable": "➡️"}
+            if sig.funding_level == "strong_warn":
+                fr_emoji = "🚨"
+                fr_tag   = " [EXTREME]"
+            elif sig.funding_level == "warn":
+                fr_emoji = "⚠️"
+                fr_tag   = " [HIGH]"
+            else:
+                fr_emoji = "ℹ️"
+                fr_tag   = ""
+            tr_icon = _fr_trend_icon.get(sig.funding_trend, "➡️")
+            fr_line = (
+                f"\n{fr_emoji} Funding: {sig.funding_rate * 100:.4f}%"
+                f"{fr_tag}  {tr_icon} {sig.funding_trend}"
+            )
 
         return (
             f"{icon} *{sig.symbol}  {sig.timeframe}  —  {st}*\n"
@@ -132,6 +161,7 @@ class ReportGenerator:
             f"• Volume:     {sig.volume_ratio:.2f}x avg\n"
             f"• Momentum:   {sig.momentum:+.2f}%\n"
             f"• ATR:        {_fmt_price(sig.atr)}"
+            f"{oi_line}"
             f"{fr_line}\n\n"
             f"⏰ Expires in {self.db.get_config('signal_expiry_hours','4')}h"
             + (f"\n🆔 Signal ID: #{signal_id}" if signal_id else "")

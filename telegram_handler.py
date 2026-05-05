@@ -204,7 +204,11 @@ class TelegramBot:
                 await loading.edit_text(f"❌ No data for `{symbol}`. Is it listed on Binance Futures?", parse_mode="Markdown")
                 return
 
-            funding  = await self.fetcher.get_funding_rate(symbol)
+            funding, oi_hist, fund_hist = await asyncio.gather(
+                self.fetcher.get_funding_rate(symbol),
+                self.fetcher.get_oi_history(symbol),
+                self.fetcher.get_funding_rate_history(symbol),
+            )
             rsi_hist = self.db.get_rsi_history(symbol, tf)
 
             sig = calculate_signal(
@@ -213,6 +217,7 @@ class TelegramBot:
                 lows=klines["lows"],   closes=klines["closes"],
                 volumes=klines["volumes"],
                 funding_rate=funding, rsi_history=rsi_hist,
+                oi_history=oi_hist, funding_history=fund_hist,
             )
             self.db.save_rsi(symbol, tf, sig.rsi)
 

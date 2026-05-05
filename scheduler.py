@@ -80,8 +80,12 @@ class BotScheduler:
                 if not klines:
                     continue
 
-                funding   = await self.fetcher.get_funding_rate(symbol)
-                rsi_hist  = self.db.get_rsi_history(symbol, tf)
+                funding, oi_hist, fund_hist = await asyncio.gather(
+                    self.fetcher.get_funding_rate(symbol),
+                    self.fetcher.get_oi_history(symbol),
+                    self.fetcher.get_funding_rate_history(symbol),
+                )
+                rsi_hist = self.db.get_rsi_history(symbol, tf)
 
                 sig = calculate_signal(
                     symbol=symbol, timeframe=tf,
@@ -89,6 +93,7 @@ class BotScheduler:
                     lows=klines["lows"],   closes=klines["closes"],
                     volumes=klines["volumes"],
                     funding_rate=funding, rsi_history=rsi_hist,
+                    oi_history=oi_hist, funding_history=fund_hist,
                 )
                 self.db.save_rsi(symbol, tf, sig.rsi)
                 results.append(sig)

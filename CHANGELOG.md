@@ -7,6 +7,36 @@ dan proyek ini menggunakan [Semantic Versioning](https://semver.org/lang/id/).
 
 ---
 
+## [1.1.0] — 2026-05-06
+
+### Added — Fitur 1: Open Interest (OI) Monitoring
+- `fetcher.py` — `get_open_interest(symbol)`: ambil OI realtime via `/fapi/v1/openInterest`
+- `fetcher.py` — `get_oi_history(symbol, period="5m", limit=12)`: 1 jam data OI via `/futures/data/openInterestHist`
+- `indicators.py` — `calculate_oi_change(oi_history, price_change_pct)`:
+  - Hitung % perubahan OI dalam 1 jam
+  - Deteksi trend: `rising` / `falling` / `flat`
+  - Signal: `bullish` (OI↑+harga↑), `bearish` (OI↑+harga↓), `weak_bullish` (OI↓+harga↑), `weak_bearish` (OI↓+harga↓)
+  - Threshold: |oi_change_1h| > 2% untuk dianggap signifikan
+- Scoring OI di `signals.py`: bullish/bearish +2, weak signals +1
+- Signal message menampilkan: OI 1h change %, trend icon, dan signal label
+
+### Added — Fitur 2: Funding Rate Agresif
+- `fetcher.py` — `get_funding_rate_history(symbol, limit=8)`: history funding rate via `/fapi/v1/fundingRate`
+- `indicators.py` — `calculate_funding_trend(funding_history)`: deteksi trend funding `rising` / `falling` / `stable`
+- Scoring funding agresif di `signals.py`:
+  - LONG + funding > +0.2% → bull_score −3 + `strong_warn` 🚨
+  - LONG + funding > +0.1% → bull_score −2 + `warn` ⚠️
+  - LONG + funding < −0.1% → bull_score +1 (kontra, bagus)
+  - SHORT + funding < −0.2% → bear_score −3 + `strong_warn` 🚨
+  - SHORT + funding < −0.1% → bear_score −2 + `warn` ⚠️
+  - SHORT + funding > +0.1% → bear_score +1 (kontra, bagus)
+- Signal message menampilkan: funding rate, level warning, trend icon
+- `SignalResult` dataclass: tambah field `funding_level`, `funding_trend`, `oi_change_1h`, `oi_trend`, `oi_signal`
+- `calculate_signal()`: parameter baru `oi_history` dan `funding_history`
+- Fetch OI + funding history paralel (`asyncio.gather`) di `telegram_handler.py` dan `scheduler.py`
+
+---
+
 ## [1.0.0] — 2026-05-06
 
 ### Added

@@ -273,16 +273,18 @@ def calculate_signal(
     price = float(closes[-1])
     a     = atr if atr > 0 else price * 0.005
 
+    # R = distance entry → SL = 1.5 × ATR
+    # TP1 = 1R, TP2 = 2R, TP3 = 3R
     if "LONG" in signal_type:
         sl   = price - 1.5 * a
         tp1  = price + 1.5 * a
-        tp2  = price + 2.5 * a
-        tp3  = price + 4.0 * a
+        tp2  = price + 3.0 * a
+        tp3  = price + 4.5 * a
     elif "SHORT" in signal_type:
         sl   = price + 1.5 * a
         tp1  = price - 1.5 * a
-        tp2  = price - 2.5 * a
-        tp3  = price - 4.0 * a
+        tp2  = price - 3.0 * a
+        tp3  = price - 4.5 * a
     else:
         sl = tp1 = tp2 = tp3 = price
 

@@ -7,6 +7,17 @@ dan proyek ini menggunakan [Semantic Versioning](https://semver.org/lang/id/).
 
 ---
 
+## [1.2.0] — 2026-05-06
+
+### Changed — Fixed Risk:Reward Take Profit
+- TP sekarang menggunakan fixed R:R, di mana R = jarak entry ke SL (= 1.5 × ATR)
+  - TP1 = 1R = 1.5 × ATR (tidak berubah)
+  - TP2 = 2R = 3.0 × ATR (sebelumnya 2.5 × ATR)
+  - TP3 = 3R = 4.5 × ATR (sebelumnya 4.0 × ATR)
+- SL tetap 1.5 × ATR, tidak ada perubahan
+
+---
+
 ## [1.1.0] — 2026-05-06
 
 ### Added — Fitur 1: Open Interest (OI) Monitoring

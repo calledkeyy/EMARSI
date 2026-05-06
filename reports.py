@@ -244,11 +244,10 @@ class ReportGenerator:
             if r.get("peak_price"):
                 pp     = r["peak_price"]
                 pp_pct = abs(pp - ep) / ep * 100 if ep else 0
-                pp_r   = pp_pct / DEFAULT_R_PCT if DEFAULT_R_PCT else pp_pct
                 tp_tag = f"  ← {r['peak_tp_touched']}" if r.get("peak_tp_touched") else ""
                 peak_line = (
                     f"\n  ⛰️ Peak: {_fmt_price(pp)}"
-                    f"  (`+{pp_r:.2f}R`){tp_tag}"
+                    f"  (`+{pp_pct:.2f}%`){tp_tag}"
                 )
 
             tp1_mark = "✅ " if r.get("tp1_hit") else "    "
@@ -273,7 +272,7 @@ class ReportGenerator:
         return (
             f"🎯 *{tp_level} Hit!*\n\n"
             f"`{symbol}`  ·  #{signal_id}\n"
-            f"PNL: {_fmt_r_pnl(pnl)}"
+            f"PNL: {_fmt_pnl(pnl)}"
         )
 
     def sl_alert(
@@ -289,17 +288,16 @@ class ReportGenerator:
         peak_line = ""
         if peak_price and entry_price:
             pp_pct = abs(peak_price - entry_price) / entry_price * 100
-            pp_r   = pp_pct / DEFAULT_R_PCT if DEFAULT_R_PCT else pp_pct
             tp_tag = f"  ← peaked at {peak_tp_touched}" if peak_tp_touched else ""
             peak_line = (
                 f"\n⛰️ Peak: {_fmt_price(peak_price)}"
-                f"  (`+{pp_r:.2f}R`){tp_tag}"
+                f"  (`+{pp_pct:.2f}%`){tp_tag}"
             )
 
         return (
             f"🛑 *Stop Loss Triggered*\n\n"
             f"`{symbol}`  ·  #{signal_id}\n"
-            f"PNL: {_fmt_r_pnl(pnl)}"
+            f"PNL: {_fmt_pnl(pnl)}"
             f"{peak_line}"
         )
 
@@ -502,7 +500,7 @@ class ReportGenerator:
             + (f"  ({sl_aft1} closed at SL after TP1)" if sl_aft1 else "")
             + f"\n  → TP2 reached before SL: {tp2_r}/{total}"
             + (f"  ({sl_aft2} closed at SL after TP2)" if sl_aft2 else "")
-            + f"\n  → Avg peak: `{avg_p / DEFAULT_R_PCT if DEFAULT_R_PCT else avg_p:+.2f}R`"
+            + f"\n  → Avg peak: `{avg_p:+.2f}%`"
         )
 
     # ── Scan summary ─────────────────────────────────────

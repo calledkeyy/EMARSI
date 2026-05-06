@@ -7,6 +7,18 @@ dan proyek ini menggunakan [Semantic Versioning](https://semver.org/lang/id/).
 
 ---
 
+## [1.5.1] — 2026-05-07
+
+### Fixed — Revert PNL display ke persentase
+- `reports.py` — `tp_alert()` dan `sl_alert()` kembalikan PNL ke `_fmt_pnl()` (%) setelah bug R notation
+- `reports.py` — `sl_alert()` peak display kembali ke `+X.XX%`
+- `reports.py` — `positions_message()` peak display kembali ke `+X.XX%`
+- `reports.py` — `_peak_analysis_block()` avg peak kembali ke `+X.XX%`
+- `telegram_handler.py` — `/history` PNL dan peak kembali ke `+X.XX%`
+- `telegram_handler.py` — `/close` konfirmasi PNL kembali ke `+X.XX%`
+
+---
+
 ## [1.5.0] — 2026-05-07
 
 ### Changed — Format Display Signal

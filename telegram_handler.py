@@ -24,7 +24,7 @@ from config import TELEGRAM_TOKEN, ALLOWED_CHAT_IDS, VALID_TIMEFRAMES
 from database import DatabaseManager
 from fetcher import BinanceFetcher
 from signals import calculate_signal
-from reports import ReportGenerator, SIGNAL_PARSE_MODE, DEFAULT_R_PCT
+from reports import ReportGenerator, SIGNAL_PARSE_MODE
 
 logger = logging.getLogger(__name__)
 
@@ -528,10 +528,9 @@ class TelegramBot:
                 pass
 
         self.db.update_signal_status(sid, status, 0.0, pnl)
-        pnl_r = pnl / DEFAULT_R_PCT if DEFAULT_R_PCT else pnl
-        sign  = "+" if pnl_r >= 0 else ""
+        sign = "+" if pnl >= 0 else ""
         await update.message.reply_text(
-            f"✅ Signal *#{sid}* → *{status}*\nPNL recorded: {sign}{pnl_r:.2f}R",
+            f"✅ Signal *#{sid}* → *{status}*\nPNL recorded: {sign}{pnl:.2f}%",
             parse_mode="Markdown",
         )
 
@@ -562,22 +561,18 @@ class TelegramBot:
 
             pnl_str = ""
             if r["status"] not in ("OPEN", "EXPIRED") and r.get("pnl_pct") is not None:
-                pnl_r   = r["pnl_pct"] / DEFAULT_R_PCT if DEFAULT_R_PCT else r["pnl_pct"]
-                sign    = "+" if pnl_r >= 0 else ""
-                pnl_str = f"  {sign}{pnl_r:.2f}R"
+                sign    = "+" if r["pnl_pct"] >= 0 else ""
+                pnl_str = f"  {sign}{r['pnl_pct']:.2f}%"
 
             # Peak extra line for SL and still-OPEN signals
             peak_str = ""
             if r.get("peak_price") and r["status"] in ("SL", "OPEN"):
-                ep      = r.get("entry_price", 0) or 0
-                sl_p    = r.get("sl_price")
-                pp      = r["peak_price"]
-                pp_pct  = abs(pp - ep) / ep * 100 if ep else 0
-                R_h     = abs(ep - sl_p) if sl_p and ep else 0
-                pp_r    = abs(pp - ep) / R_h if R_h > 0 else pp_pct / DEFAULT_R_PCT
-                tp_tag  = f" ← {r['peak_tp_touched']}" if r.get("peak_tp_touched") else ""
+                ep     = r.get("entry_price", 0) or 0
+                pp     = r["peak_price"]
+                pp_pct = abs(pp - ep) / ep * 100 if ep else 0
+                tp_tag = f" ← {r['peak_tp_touched']}" if r.get("peak_tp_touched") else ""
                 peak_str = (
-                    f"\n   ⛰️ Peak: `+{pp_r:.2f}R`{tp_tag}"
+                    f"\n   ⛰️ Peak: `+{pp_pct:.2f}%`{tp_tag}"
                 )
 
             lines.append(

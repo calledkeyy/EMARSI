@@ -24,7 +24,7 @@ from config import TELEGRAM_TOKEN, ALLOWED_CHAT_IDS, VALID_TIMEFRAMES
 from database import DatabaseManager
 from fetcher import BinanceFetcher
 from signals import calculate_signal
-from reports import ReportGenerator, SIGNAL_PARSE_MODE
+from reports import ReportGenerator, SIGNAL_PARSE_MODE, DEFAULT_PARSE_MODE
 
 logger = logging.getLogger(__name__)
 
@@ -89,16 +89,15 @@ class TelegramBot:
     # ─────────────────────────────────────────────────────
     #  Broadcast helpers
     # ─────────────────────────────────────────────────────
-    async def broadcast_text(self, text: str) -> None:
-        for chat_id in (ALLOWED_CHAT_IDS or []):
-            await self._send(chat_id, text)
+    async def broadcast_text(self, text: str, parse_mode: str = DEFAULT_PARSE_MODE) -> None:
+        if ALLOWED_CHAT_IDS:
+            await asyncio.gather(*[self._send(cid, text, parse_mode=parse_mode) for cid in ALLOWED_CHAT_IDS])
 
     async def broadcast_signal(self, sig, signal_id: int) -> None:
         msg = self.reports.signal_message(sig, signal_id)
-        for chat_id in (ALLOWED_CHAT_IDS or []):
-            await self._send(chat_id, msg, parse_mode=SIGNAL_PARSE_MODE)
+        await self.broadcast_text(msg, parse_mode=SIGNAL_PARSE_MODE)
 
-    async def _send(self, chat_id: int, text: str, markup=None, parse_mode: str = "Markdown") -> None:
+    async def _send(self, chat_id: int, text: str, markup=None, parse_mode: str = DEFAULT_PARSE_MODE) -> None:
         if not self.app:
             return
         try:

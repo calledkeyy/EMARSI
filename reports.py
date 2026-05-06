@@ -11,8 +11,8 @@ from database import DatabaseManager
 # ── [FEATURE 2] R constant — 1R = 1.5% (SL = 1.5 × ATR) ─────
 DEFAULT_R_PCT: float = 1.5
 
-# Parse mode required for signal_message (uses MarkdownV2 blockquotes)
-SIGNAL_PARSE_MODE: str = "MarkdownV2"
+SIGNAL_PARSE_MODE:  str = "MarkdownV2"
+DEFAULT_PARSE_MODE: str = "Markdown"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -45,15 +45,6 @@ def _pct_to_r(pct: float) -> str:
     sign = "+" if r >= 0 else ""
     return f"  (~{sign}{r:.2f}R)"
 
-def _fmt_r_pnl(pnl: float) -> str:
-    """Format PNL as R notation for signal alerts (replaces %)."""
-    if DEFAULT_R_PCT == 0:
-        return _fmt_pnl(pnl)
-    r = pnl / DEFAULT_R_PCT
-    sign = "+" if r >= 0 else ""
-    emoji = "🟢" if r >= 0 else "🔴"
-    return f"{emoji} {sign}{r:.2f}R"
-
 _SIGNAL_ICON = {
     "LONG":       "🟢",
     "SHORT":      "🔴",
@@ -71,6 +62,17 @@ _STATUS_ICON = {
     "EXPIRED":     "⏰",
     "INVALIDATED": "⚠️",
 }
+
+_OI_ICON = {"rising": "📈", "falling": "📉", "flat": "➡️"}
+_OI_TEXT = {
+    "bullish":      "Bullish",
+    "bearish":      "Bearish",
+    "weak_bullish": "Weak Bullish",
+    "weak_bearish": "Weak Bearish",
+    "neutral":      "Neutral",
+}
+_FR_ICON  = {"rising": "📈", "falling": "📉", "stable": "➡️"}
+_VA_COLOR = {"buying_pressure": "🟢", "selling_pressure": "🔴"}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -131,22 +133,15 @@ class ReportGenerator:
         # ── [FEATURE 4] OI — blockquote line ─────────────
         oi_line = ""
         if sig.oi_change_1h != 0.0 or sig.oi_trend != "flat":
-            _oi_icon = {"rising": "📈", "falling": "📉", "flat": "➡️"}
-            _oi_text = {
-                "bullish": "Bullish", "bearish": "Bearish",
-                "weak_bullish": "Weak Bullish", "weak_bearish": "Weak Bearish",
-                "neutral": "Neutral",
-            }
             sign    = "+" if sig.oi_change_1h >= 0 else ""
             oi_line = (
                 f"\n> • OI \\(1h\\)     : `{sign}{sig.oi_change_1h:.2f}%`"
-                f"  {_oi_icon.get(sig.oi_trend,'➡️')} {_oi_text.get(sig.oi_signal,'Neutral')}"
+                f"  {_OI_ICON.get(sig.oi_trend,'➡️')} {_OI_TEXT.get(sig.oi_signal,'Neutral')}"
             )
 
         # ── [FEATURE 4] Funding — blockquote line ────────
         fr_line = ""
         if abs(sig.funding_rate) > 0.0001:
-            _fr_icon = {"rising": "📈", "falling": "📉", "stable": "➡️"}
             if sig.funding_level == "strong_warn":
                 fr_emoji, fr_tag = "🚨", " \\[EXTREME\\]"
             elif sig.funding_level == "warn":
@@ -155,7 +150,7 @@ class ReportGenerator:
                 fr_emoji, fr_tag = "ℹ️", ""
             fr_line = (
                 f"\n> {fr_emoji} Funding      : `{sig.funding_rate * 100:.4f}%`"
-                f"{fr_tag}  {_fr_icon.get(sig.funding_trend,'➡️')} {sig.funding_trend}"
+                f"{fr_tag}  {_FR_ICON.get(sig.funding_trend,'➡️')} {sig.funding_trend}"
             )
 
         # Source label — escape brackets for MarkdownV2
@@ -164,7 +159,7 @@ class ReportGenerator:
         # ── [FEATURE 4] Volume — blockquote line ─────────
         va = sig.volume_anomaly or {}
         if va.get("anomaly"):
-            _va_color    = {"buying_pressure": "🟢", "selling_pressure": "🔴"}.get(va.get("type",""), "⚪")
+            _va_color    = _VA_COLOR.get(va.get("type", ""), "⚪")
             _va_strength = va.get("strength", "").capitalize()
             _va_dir      = "Buying" if va.get("type") == "buying_pressure" else "Selling"
             _va_cvd      = va.get("cvd_trend", "").capitalize()
@@ -177,10 +172,11 @@ class ReportGenerator:
         else:
             vol_display = f"• Volume      : `{sig.volume_ratio:.2f}x avg`"
 
+        edge = abs(sig.bull_score - sig.bear_score)
         if sig.bull_score >= sig.bear_score:
-            score_line = f"⚖️  Score: Bull `{sig.bull_score:.1f}`  (edge `+{sig.bull_score - sig.bear_score:.1f}`)"
+            score_line = f"⚖️  Score: Bull `{sig.bull_score:.1f}`  (edge `+{edge:.1f}`)"
         else:
-            score_line = f"⚖️  Score: Bear `{sig.bear_score:.1f}`  (edge `+{sig.bear_score - sig.bull_score:.1f}`)"
+            score_line = f"⚖️  Score: Bear `{sig.bear_score:.1f}`  (edge `+{edge:.1f}`)"
 
         return (
             f"{src_line}{icon} *{sig.symbol}  {sig.timeframe}  —  {st}*\n"

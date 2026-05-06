@@ -24,7 +24,7 @@ from config import TELEGRAM_TOKEN, ALLOWED_CHAT_IDS, VALID_TIMEFRAMES
 from database import DatabaseManager
 from fetcher import BinanceFetcher
 from signals import calculate_signal
-from reports import ReportGenerator
+from reports import ReportGenerator, SIGNAL_PARSE_MODE, DEFAULT_R_PCT
 
 logger = logging.getLogger(__name__)
 
@@ -95,16 +95,17 @@ class TelegramBot:
 
     async def broadcast_signal(self, sig, signal_id: int) -> None:
         msg = self.reports.signal_message(sig, signal_id)
-        await self.broadcast_text(msg)
+        for chat_id in (ALLOWED_CHAT_IDS or []):
+            await self._send(chat_id, msg, parse_mode=SIGNAL_PARSE_MODE)
 
-    async def _send(self, chat_id: int, text: str, markup=None) -> None:
+    async def _send(self, chat_id: int, text: str, markup=None, parse_mode: str = "Markdown") -> None:
         if not self.app:
             return
         try:
             await self.app.bot.send_message(
                 chat_id=chat_id,
                 text=text,
-                parse_mode="Markdown",
+                parse_mode=parse_mode,
                 reply_markup=markup,
                 disable_web_page_preview=True,
             )
@@ -237,7 +238,7 @@ class TelegramBot:
                 signal_id = self.db.save_signal(sig, expiry)
 
             msg = self.reports.signal_message(sig, signal_id)
-            await loading.edit_text(msg, parse_mode="Markdown")
+            await loading.edit_text(msg, parse_mode=SIGNAL_PARSE_MODE)
 
         except Exception as e:
             logger.exception("cmd_signal error: %s", e)
@@ -276,7 +277,7 @@ class TelegramBot:
                    and s.confidence >= int(self.db.get_config("min_confidence", "6"))]
         for sig in sorted(strong, key=lambda x: x.confidence, reverse=True)[:5]:
             msg = self.reports.signal_message(sig)
-            await self._send(chat_id, msg)
+            await self._send(chat_id, msg, parse_mode=SIGNAL_PARSE_MODE)
             await asyncio.sleep(0.5)
 
     # ─────────────────────────────────────────────────────
@@ -527,9 +528,10 @@ class TelegramBot:
                 pass
 
         self.db.update_signal_status(sid, status, 0.0, pnl)
-        sign = "+" if pnl >= 0 else ""
+        pnl_r = pnl / DEFAULT_R_PCT if DEFAULT_R_PCT else pnl
+        sign  = "+" if pnl_r >= 0 else ""
         await update.message.reply_text(
-            f"✅ Signal *#{sid}* → *{status}*\nPNL recorded: {sign}{pnl:.2f}%",
+            f"✅ Signal *#{sid}* → *{status}*\nPNL recorded: {sign}{pnl_r:.2f}R",
             parse_mode="Markdown",
         )
 
@@ -560,18 +562,22 @@ class TelegramBot:
 
             pnl_str = ""
             if r["status"] not in ("OPEN", "EXPIRED") and r.get("pnl_pct") is not None:
-                sign    = "+" if r["pnl_pct"] >= 0 else ""
-                pnl_str = f"  {sign}{r['pnl_pct']:.2f}%"
+                pnl_r   = r["pnl_pct"] / DEFAULT_R_PCT if DEFAULT_R_PCT else r["pnl_pct"]
+                sign    = "+" if pnl_r >= 0 else ""
+                pnl_str = f"  {sign}{pnl_r:.2f}R"
 
             # Peak extra line for SL and still-OPEN signals
             peak_str = ""
             if r.get("peak_price") and r["status"] in ("SL", "OPEN"):
                 ep      = r.get("entry_price", 0) or 0
+                sl_p    = r.get("sl_price")
                 pp      = r["peak_price"]
                 pp_pct  = abs(pp - ep) / ep * 100 if ep else 0
+                R_h     = abs(ep - sl_p) if sl_p and ep else 0
+                pp_r    = abs(pp - ep) / R_h if R_h > 0 else pp_pct / DEFAULT_R_PCT
                 tp_tag  = f" ← {r['peak_tp_touched']}" if r.get("peak_tp_touched") else ""
                 peak_str = (
-                    f"\n   ⛰️ Peak: `{pp_pct:+.2f}%`{tp_tag}"
+                    f"\n   ⛰️ Peak: `+{pp_r:.2f}R`{tp_tag}"
                 )
 
             lines.append(
@@ -626,7 +632,7 @@ class TelegramBot:
         ]
         for sig in sorted(strong, key=lambda x: x.confidence, reverse=True)[:5]:
             msg = self.reports.signal_message(sig, source_label="Top30 Scan")
-            await self._send(chat_id, msg)
+            await self._send(chat_id, msg, parse_mode=SIGNAL_PARSE_MODE)
             await asyncio.sleep(0.5)
 
     # ─────────────────────────────────────────────────────

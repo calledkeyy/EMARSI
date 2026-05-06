@@ -7,6 +7,25 @@ dan proyek ini menggunakan [Semantic Versioning](https://semver.org/lang/id/).
 
 ---
 
+## [1.5.0] — 2026-05-07
+
+### Changed — Format Display Signal
+
+- `reports.py` — `signal_message()` beralih ke **MarkdownV2** dengan blockquote (`>`) untuk seluruh blok indikator:
+  - RSI, MACD Hist, ADX, BB Pos, EMA, Volume, Momentum, ATR, OI, Funding Rate tampil dalam blockquote bertanda garis vertikal Telegram
+  - Konstanta `SIGNAL_PARSE_MODE = "MarkdownV2"` diekspor untuk dipakai di handler
+- `reports.py` — helper baru `_fmt_r_pnl(pnl: float) -> str`: format PNL sebagai R notation (`🟢 +1.00R` / `🔴 -1.00R`)
+- `reports.py` — `tp_alert()` dan `sl_alert()` gunakan `_fmt_r_pnl()` — PNL ditampilkan dalam R, bukan %
+- `reports.py` — `positions_message()` dan `_peak_analysis_block()` tampilkan peak dalam R
+- `reports.py` — **Fix R:R** — baris `📊 R:R` sebelumnya menggunakan TP2 (2R), sekarang menggunakan TP3 (3R) sebagai target full close
+- `reports.py` — **Score display disederhanakan** — dari `Bull X.X  Bear X.X` menjadi sisi dominan + edge: `Bull 8.5  (edge +5.5)` atau `Bear 7.0  (edge +4.0)`
+- `telegram_handler.py` — `_send()` terima parameter `parse_mode` (default `"Markdown"` untuk backward compat)
+- `telegram_handler.py` — `broadcast_signal()`, `cmd_signal()`, `cmd_scan()`, `cmd_topscan()` kirim signal message dengan `parse_mode=SIGNAL_PARSE_MODE`
+- `telegram_handler.py` — `/history` tampilkan PNL dan peak dalam R notation
+- `telegram_handler.py` — `/close` konfirmasi PNL dalam R notation
+
+---
+
 ## [1.4.0] — 2026-05-06
 
 ### Added — Fitur 1: `/positions` Command

@@ -11,6 +11,9 @@ from database import DatabaseManager
 # ── [FEATURE 2] R constant — 1R = 1.5% (SL = 1.5 × ATR) ─────
 DEFAULT_R_PCT: float = 1.5
 
+# Parse mode required for signal_message (uses MarkdownV2 blockquotes)
+SIGNAL_PARSE_MODE: str = "MarkdownV2"
+
 
 # ─────────────────────────────────────────────────────────────
 #  Small helpers
@@ -42,6 +45,15 @@ def _pct_to_r(pct: float) -> str:
     sign = "+" if r >= 0 else ""
     return f"  (~{sign}{r:.2f}R)"
 
+def _fmt_r_pnl(pnl: float) -> str:
+    """Format PNL as R notation for signal alerts (replaces %)."""
+    if DEFAULT_R_PCT == 0:
+        return _fmt_pnl(pnl)
+    r = pnl / DEFAULT_R_PCT
+    sign = "+" if r >= 0 else ""
+    emoji = "🟢" if r >= 0 else "🔴"
+    return f"{emoji} {sign}{r:.2f}R"
+
 _SIGNAL_ICON = {
     "LONG":       "🟢",
     "SHORT":      "🔴",
@@ -68,7 +80,7 @@ class ReportGenerator:
     def __init__(self, db: DatabaseManager) -> None:
         self.db = db
 
-    # ── Signal alert ─────────────────────────────────────
+    # ── Signal alert (MarkdownV2 — blockquote for indicators) ──
     def signal_message(
         self, sig, signal_id: Optional[int] = None, source_label: str = ""
     ) -> str:
@@ -83,7 +95,7 @@ class ReportGenerator:
                 return "?R"
             v = round(abs(target - ep) / R, 1)
             return f"{v:.1f}R"
-        tp2_rr_val = (abs(sig.tp2_price - ep) / R) if R > 0 else 2.0
+        tp3_rr_val = (abs(sig.tp3_price - ep) / R) if R > 0 else 3.0
 
         # EMA label
         if sig.ema9 > sig.ema21 > sig.ema50:
@@ -109,14 +121,14 @@ class ReportGenerator:
         else:
             bb_lbl = "Middle"
 
-        # Divergence
+        # Divergence — escape ! for MarkdownV2
         div_line = ""
         if sig.divergence == "bullish":
-            div_line = "\n⚡ *Bullish Divergence Detected!*"
+            div_line = "\n⚡ *Bullish Divergence Detected\\!*"
         elif sig.divergence == "bearish":
-            div_line = "\n⚡ *Bearish Divergence Detected!*"
+            div_line = "\n⚡ *Bearish Divergence Detected\\!*"
 
-        # ── [FEATURE 4] OI — backtick format ──────────────
+        # ── [FEATURE 4] OI — blockquote line ─────────────
         oi_line = ""
         if sig.oi_change_1h != 0.0 or sig.oi_trend != "flat":
             _oi_icon = {"rising": "📈", "falling": "📉", "flat": "➡️"}
@@ -125,31 +137,31 @@ class ReportGenerator:
                 "weak_bullish": "Weak Bullish", "weak_bearish": "Weak Bearish",
                 "neutral": "Neutral",
             }
-            sign     = "+" if sig.oi_change_1h >= 0 else ""
-            oi_line  = (
-                f"\n• OI (1h)     : `{sign}{sig.oi_change_1h:.2f}%`"
+            sign    = "+" if sig.oi_change_1h >= 0 else ""
+            oi_line = (
+                f"\n> • OI \\(1h\\)     : `{sign}{sig.oi_change_1h:.2f}%`"
                 f"  {_oi_icon.get(sig.oi_trend,'➡️')} {_oi_text.get(sig.oi_signal,'Neutral')}"
             )
 
-        # ── [FEATURE 4] Funding — backtick format ─────────
+        # ── [FEATURE 4] Funding — blockquote line ────────
         fr_line = ""
         if abs(sig.funding_rate) > 0.0001:
             _fr_icon = {"rising": "📈", "falling": "📉", "stable": "➡️"}
             if sig.funding_level == "strong_warn":
-                fr_emoji, fr_tag = "🚨", " [EXTREME]"
+                fr_emoji, fr_tag = "🚨", " \\[EXTREME\\]"
             elif sig.funding_level == "warn":
-                fr_emoji, fr_tag = "⚠️", " [HIGH]"
+                fr_emoji, fr_tag = "⚠️", " \\[HIGH\\]"
             else:
                 fr_emoji, fr_tag = "ℹ️", ""
             fr_line = (
-                f"\n{fr_emoji} Funding      : `{sig.funding_rate * 100:.4f}%`"
+                f"\n> {fr_emoji} Funding      : `{sig.funding_rate * 100:.4f}%`"
                 f"{fr_tag}  {_fr_icon.get(sig.funding_trend,'➡️')} {sig.funding_trend}"
             )
 
-        # Source label (e.g. Top30 Scan)
-        src_line = f"🔍 *[{source_label}]*\n" if source_label else ""
+        # Source label — escape brackets for MarkdownV2
+        src_line = f"🔍 *\\[{source_label}\\]*\n" if source_label else ""
 
-        # ── [FEATURE 4] Volume — backtick format ──────────
+        # ── [FEATURE 4] Volume — blockquote line ─────────
         va = sig.volume_anomaly or {}
         if va.get("anomaly"):
             _va_color    = {"buying_pressure": "🟢", "selling_pressure": "🔴"}.get(va.get("type",""), "⚪")
@@ -165,31 +177,36 @@ class ReportGenerator:
         else:
             vol_display = f"• Volume      : `{sig.volume_ratio:.2f}x avg`"
 
+        if sig.bull_score >= sig.bear_score:
+            score_line = f"⚖️  Score: Bull `{sig.bull_score:.1f}`  (edge `+{sig.bull_score - sig.bear_score:.1f}`)"
+        else:
+            score_line = f"⚖️  Score: Bear `{sig.bear_score:.1f}`  (edge `+{sig.bear_score - sig.bull_score:.1f}`)"
+
         return (
             f"{src_line}{icon} *{sig.symbol}  {sig.timeframe}  —  {st}*\n"
             f"{'─'*34}\n"
             f"🎯 Confidence: {_conf_bar(sig.confidence)}\n"
-            f"⚖️  Score: Bull {sig.bull_score:.1f}  Bear {sig.bear_score:.1f}"
+            f"{score_line}"
             f"{div_line}\n\n"
-            f"💰 *Entry:*  {_fmt_price(ep)}\n"
-            f"🛑 *SL:*     {_fmt_price(sig.sl_price)}  → `-1R`\n"
-            f"🎁 *TP1:*   {_fmt_price(sig.tp1_price)}  → `+{_rr(sig.tp1_price)}`\n"
-            f"🎁 *TP2:*   {_fmt_price(sig.tp2_price)}  → `+{_rr(sig.tp2_price)}`\n"
-            f"🎁 *TP3:*   {_fmt_price(sig.tp3_price)}  → `+{_rr(sig.tp3_price)}`  ← full close order\n"
-            f"📊 *R:R*     1:{tp2_rr_val:.1f}\n\n"
+            f"💰 *Entry:*  `{_fmt_price(ep)}`\n"
+            f"🛑 *SL:*     `{_fmt_price(sig.sl_price)}`  → `-1R`\n"
+            f"🎁 *TP1:*   `{_fmt_price(sig.tp1_price)}`  → `+{_rr(sig.tp1_price)}`\n"
+            f"🎁 *TP2:*   `{_fmt_price(sig.tp2_price)}`  → `+{_rr(sig.tp2_price)}`\n"
+            f"🎁 *TP3:*   `{_fmt_price(sig.tp3_price)}`  → `+{_rr(sig.tp3_price)}`  ← full close order\n"
+            f"📊 *R:R*     1:`{tp3_rr_val:.1f}`\n\n"
             f"📉 *Indicators*\n"
-            f"• RSI(14)     : `{sig.rsi:.1f}`\n"
-            f"• MACD Hist   : `{sig.macd_hist:+.6f}`\n"
-            f"• ADX         : `{sig.adx:.1f}`  → {adx_lbl}\n"
-            f"• BB Pos      : `{sig.bb_position:.2f}`  → {bb_lbl}\n"
-            f"• EMA 9/21/50 : `{ema_lbl}`\n"
-            f"{vol_display}\n"
-            f"• Momentum    : `{sig.momentum:+.2f}%`\n"
-            f"• ATR         : `{_fmt_price(sig.atr)}`"
+            f"> • RSI\\(14\\)     : `{sig.rsi:.1f}`\n"
+            f"> • MACD Hist   : `{sig.macd_hist:+.6f}`\n"
+            f"> • ADX         : `{sig.adx:.1f}`  → {adx_lbl}\n"
+            f"> • BB Pos      : `{sig.bb_position:.2f}`  → {bb_lbl}\n"
+            f"> • EMA 9/21/50 : {ema_lbl}\n"
+            f"> {vol_display}\n"
+            f"> • Momentum    : `{sig.momentum:+.2f}%`\n"
+            f"> • ATR         : `{_fmt_price(sig.atr)}`"
             f"{oi_line}"
             f"{fr_line}\n\n"
             f"⏰ Expires in {self.db.get_config('signal_expiry_hours','4')}h"
-            + (f"\n🆔 Signal ID: #{signal_id}" if signal_id else "")
+            + (f"\n🆔 Signal ID: \\#{signal_id}" if signal_id else "")
         )
 
     # ── [FEATURE 1] Open positions list ──────────────────
@@ -227,10 +244,11 @@ class ReportGenerator:
             if r.get("peak_price"):
                 pp     = r["peak_price"]
                 pp_pct = abs(pp - ep) / ep * 100 if ep else 0
+                pp_r   = pp_pct / DEFAULT_R_PCT if DEFAULT_R_PCT else pp_pct
                 tp_tag = f"  ← {r['peak_tp_touched']}" if r.get("peak_tp_touched") else ""
                 peak_line = (
                     f"\n  ⛰️ Peak: {_fmt_price(pp)}"
-                    f"  (`{pp_pct:+.2f}%`{_pct_to_r(pp_pct)}){tp_tag}"
+                    f"  (`+{pp_r:.2f}R`){tp_tag}"
                 )
 
             tp1_mark = "✅ " if r.get("tp1_hit") else "    "
@@ -255,7 +273,7 @@ class ReportGenerator:
         return (
             f"🎯 *{tp_level} Hit!*\n\n"
             f"`{symbol}`  ·  #{signal_id}\n"
-            f"PNL: {_fmt_pnl(pnl)}"
+            f"PNL: {_fmt_r_pnl(pnl)}"
         )
 
     def sl_alert(
@@ -271,16 +289,17 @@ class ReportGenerator:
         peak_line = ""
         if peak_price and entry_price:
             pp_pct = abs(peak_price - entry_price) / entry_price * 100
+            pp_r   = pp_pct / DEFAULT_R_PCT if DEFAULT_R_PCT else pp_pct
             tp_tag = f"  ← peaked at {peak_tp_touched}" if peak_tp_touched else ""
             peak_line = (
                 f"\n⛰️ Peak: {_fmt_price(peak_price)}"
-                f"  (`{pp_pct:+.2f}%`{_pct_to_r(pp_pct)}){tp_tag}"
+                f"  (`+{pp_r:.2f}R`){tp_tag}"
             )
 
         return (
             f"🛑 *Stop Loss Triggered*\n\n"
             f"`{symbol}`  ·  #{signal_id}\n"
-            f"PNL: {_fmt_pnl(pnl)}"
+            f"PNL: {_fmt_r_pnl(pnl)}"
             f"{peak_line}"
         )
 
@@ -483,7 +502,7 @@ class ReportGenerator:
             + (f"  ({sl_aft1} closed at SL after TP1)" if sl_aft1 else "")
             + f"\n  → TP2 reached before SL: {tp2_r}/{total}"
             + (f"  ({sl_aft2} closed at SL after TP2)" if sl_aft2 else "")
-            + f"\n  → Avg peak: `{avg_p:+.2f}%`{_pct_to_r(avg_p)}"
+            + f"\n  → Avg peak: `{avg_p / DEFAULT_R_PCT if DEFAULT_R_PCT else avg_p:+.2f}R`"
         )
 
     # ── Scan summary ─────────────────────────────────────

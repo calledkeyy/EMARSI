@@ -7,6 +7,16 @@ dan proyek ini menggunakan [Semantic Versioning](https://semver.org/lang/id/).
 
 ---
 
+## [1.5.2] — 2026-05-07
+
+### Refactored — Simplify review cleanup
+- `reports.py` — hapus fungsi dead `_fmt_r_pnl()` (tidak ada caller setelah revert v1.5.1)
+- `reports.py` — promosikan dict lookup `_OI_ICON`, `_OI_TEXT`, `_FR_ICON`, `_VA_COLOR` ke module-level (sebelumnya dibangun ulang setiap call `signal_message()`)
+- `reports.py` — komputasi `edge` cukup satu kali sebelum branching score display
+- `telegram_handler.py` — `broadcast_text()` terima parameter `parse_mode` dan gunakan `asyncio.gather` untuk concurrent send ke semua chat ID
+
+---
+
 ## [1.5.1] — 2026-05-07
 
 ### Fixed — Revert PNL display ke persentase

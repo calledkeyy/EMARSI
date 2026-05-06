@@ -49,6 +49,24 @@ class DatabaseManager:
         self._init_config()
         self._init_lifetime()
         self._init_monthly()          # current month
+        self._migrate_signals_table() # backward-compat column additions
+
+    def _migrate_signals_table(self) -> None:
+        """Add new columns to all existing monthly DBs (silent if already present)."""
+        new_cols = [
+            "ALTER TABLE signals ADD COLUMN is_executed     INTEGER DEFAULT 0",
+            "ALTER TABLE signals ADD COLUMN peak_price      REAL    DEFAULT NULL",
+            "ALTER TABLE signals ADD COLUMN peak_tp_touched TEXT    DEFAULT NULL",
+        ]
+        for fname in os.listdir(self.db_dir):
+            if fname.startswith("signals_") and fname.endswith(".db"):
+                path = os.path.join(self.db_dir, fname)
+                with _conn(path) as c:
+                    for sql in new_cols:
+                        try:
+                            c.execute(sql)
+                        except Exception:
+                            pass  # column already exists
 
     def _init_config(self) -> None:
         with _conn(self.config_db) as c:
@@ -161,7 +179,10 @@ class DatabaseManager:
                     invalidated_reason TEXT,
                     created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     closed_at         TIMESTAMP,
-                    expires_at        TIMESTAMP
+                    expires_at        TIMESTAMP,
+                    is_executed       INTEGER DEFAULT 0,
+                    peak_price        REAL    DEFAULT NULL,
+                    peak_tp_touched   TEXT    DEFAULT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_sig_sym    ON signals(symbol);
                 CREATE INDEX IF NOT EXISTS idx_sig_status ON signals(status);
@@ -394,7 +415,8 @@ class DatabaseManager:
         with _conn(path) as c:
             rows = c.execute("""
                 SELECT id, symbol, timeframe, signal_type, confidence,
-                       status, pnl_pct, created_at
+                       status, pnl_pct, created_at,
+                       is_executed, peak_price, peak_tp_touched
                 FROM signals ORDER BY id DESC LIMIT ?
             """, (limit,)).fetchall()
         return [dict(r) for r in rows]
@@ -474,6 +496,48 @@ class DatabaseManager:
             if f.startswith("signals_") and f.endswith(".db"):
                 months.append(f[8:-3])   # "YYYY_MM"
         return sorted(months)
+
+    # ── [FEATURE 3] Executed flag ─────────────────────────
+    def mark_executed(self, signal_id: int, executed: bool = True,
+                      year: int | None = None, month: int | None = None) -> None:
+        """Mark signal as executed (trade taken) or observation only."""
+        path = self._monthly_path(year, month)
+        if not os.path.exists(path):
+            return
+        with _conn(path) as c:
+            c.execute(
+                "UPDATE signals SET is_executed=? WHERE id=?",
+                (1 if executed else 0, signal_id),
+            )
+
+    # ── [FEATURE 5] Peak tracking ─────────────────────────
+    def update_peak(self, signal_id: int, peak_price: float, peak_tp: str,
+                    year: int | None = None, month: int | None = None) -> None:
+        """Update highest/lowest price reached and corresponding TP level."""
+        path = self._monthly_path(year, month)
+        if not os.path.exists(path):
+            return
+        with _conn(path) as c:
+            c.execute(
+                "UPDATE signals SET peak_price=?, peak_tp_touched=? WHERE id=?",
+                (peak_price, peak_tp, signal_id),
+            )
+
+    def get_peak_analysis(self, date_from: str, date_to: str,
+                          year: int | None = None, month: int | None = None) -> Dict:
+        """Distribution of peak_tp_touched for SL trades in a date range."""
+        path = self._monthly_path(year, month)
+        if not os.path.exists(path):
+            return {}
+        with _conn(path) as c:
+            rows = c.execute("""
+                SELECT COALESCE(peak_tp_touched, 'NONE') AS peak_tp, COUNT(*) AS cnt
+                FROM signals
+                WHERE status = 'SL'
+                  AND created_at BETWEEN ? AND ?
+                GROUP BY peak_tp_touched
+            """, (date_from, date_to)).fetchall()
+        return {r["peak_tp"]: r["cnt"] for r in rows}
 
     def ensure_month_db(self, year: int | None = None, month: int | None = None) -> str:
         """Create monthly DB if it doesn't exist yet (called at month rollover)."""

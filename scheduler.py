@@ -138,6 +138,7 @@ class BotScheduler:
         # Fetch all prices in one API call to minimise requests
         all_prices = await self.fetcher.get_all_prices()
         tf         = self.db.get_config("default_timeframe", "15m")
+        now        = datetime.now()
 
         for sig in open_signals:
             symbol = sig["symbol"]
@@ -153,9 +154,25 @@ class BotScheduler:
             tp2    = sig["tp2_price"]
             tp3    = sig["tp3_price"]
 
+            # ── [FEATURE 5] Peak tracking ─────────────────────
+            peak_px = sig.get("peak_price")
+            peak_tp = sig.get("peak_tp_touched")
+
             try:
                 if "LONG" in s_type:
                     pnl = (price - entry) / entry * 100
+
+                    # Update peak if price moved more favourably
+                    if peak_px is None or price > peak_px:
+                        new_tp = None
+                        if price >= tp3:
+                            new_tp = "TP3"
+                        elif price >= tp2:
+                            new_tp = "TP2"
+                        elif price >= tp1:
+                            new_tp = "TP1"
+                        self.db.update_peak(sid, price, new_tp, now.year, now.month)
+                        peak_px, peak_tp = price, new_tp
 
                     if not sig["tp3_hit"] and price >= tp3:
                         self.db.update_signal_status(sid, "TP3", price, pnl)
@@ -171,7 +188,7 @@ class BotScheduler:
 
                     elif price <= sl:
                         self.db.update_signal_status(sid, "SL", price, pnl)
-                        await self._alert_sl(symbol, sid, pnl)
+                        await self._alert_sl(symbol, sid, pnl, peak_px, peak_tp, entry)
 
                     # Invalidation: EMA flipped bearish while in LONG
                     elif pnl < -3:
@@ -184,6 +201,18 @@ class BotScheduler:
 
                 elif "SHORT" in s_type:
                     pnl = (entry - price) / entry * 100
+
+                    # Update peak if price moved more favourably (lower = better for SHORT)
+                    if peak_px is None or price < peak_px:
+                        new_tp = None
+                        if price <= tp3:
+                            new_tp = "TP3"
+                        elif price <= tp2:
+                            new_tp = "TP2"
+                        elif price <= tp1:
+                            new_tp = "TP1"
+                        self.db.update_peak(sid, price, new_tp, now.year, now.month)
+                        peak_px, peak_tp = price, new_tp
 
                     if not sig["tp3_hit"] and price <= tp3:
                         self.db.update_signal_status(sid, "TP3", price, pnl)
@@ -199,7 +228,7 @@ class BotScheduler:
 
                     elif price >= sl:
                         self.db.update_signal_status(sid, "SL", price, pnl)
-                        await self._alert_sl(symbol, sid, pnl)
+                        await self._alert_sl(symbol, sid, pnl, peak_px, peak_tp, entry)
 
                     # Invalidation: EMA flipped bullish while in SHORT
                     elif pnl < -3:
@@ -221,9 +250,22 @@ class BotScheduler:
             msg = self.reports.tp_alert(symbol, sid, level, pnl)
             await self.bot.broadcast_text(msg)
 
-    async def _alert_sl(self, symbol: str, sid: int, pnl: float) -> None:
+    async def _alert_sl(
+        self,
+        symbol: str,
+        sid: int,
+        pnl: float,
+        peak_price: Optional[float] = None,
+        peak_tp: Optional[str] = None,
+        entry_price: Optional[float] = None,
+    ) -> None:
         if self.bot:
-            msg = self.reports.sl_alert(symbol, sid, pnl)
+            msg = self.reports.sl_alert(
+                symbol, sid, pnl,
+                peak_price=peak_price,
+                peak_tp_touched=peak_tp,
+                entry_price=entry_price,
+            )
             await self.bot.broadcast_text(msg)
 
     async def _alert_invalidated(self, symbol: str, sid: int, reason: str) -> None:

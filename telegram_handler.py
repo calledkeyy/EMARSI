@@ -71,6 +71,9 @@ class TelegramBot:
             ("history",     self.cmd_history),
             ("topscan",     self.cmd_topscan),
             ("toplist",     self.cmd_toplist),
+            ("positions",   self.cmd_positions),
+            ("execute",     self.cmd_execute),
+            ("unexecute",   self.cmd_unexecute),
         ]
         for name, handler in cmds:
             self.app.add_handler(CommandHandler(name, handler))
@@ -167,7 +170,11 @@ class TelegramBot:
             "/resume — start auto-scan\n"
             "/status — bot status\n"
             "/close `ID` `STATUS`  — close signal manually\n"
-            "  Status: TP1 TP2 TP3 SL EXPIRED",
+            "  Status: TP1 TP2 TP3 SL EXPIRED\n\n"
+            "*📋 Positions*\n"
+            "/positions            — all open signals\n"
+            "/execute `ID`         — mark signal as executed trade\n"
+            "/unexecute `ID`       — mark signal as observation only",
             parse_mode="Markdown",
         )
 
@@ -541,18 +548,43 @@ class TelegramBot:
         if not rows:
             await update.message.reply_text("No signals this month."); return
 
-        lines = [f"📜 *Last {limit} Signals*", "━" * 30]
+        lines      = [f"📜 *Last {limit} Signals*", "━" * 30]
+        exec_count = 0
+
         for r in rows:
             st_icon  = _STATUS_ICON.get(r["status"], "❓")
             sig_icon = "🟢" if "LONG" in r["signal_type"] else "🔴"
-            pnl_str  = (f"  {'+' if r['pnl_pct'] >= 0 else ''}{r['pnl_pct']:.2f}%"
-                        if r["status"] not in ("OPEN", "EXPIRED") else "")
+            exec_ic  = "🔵" if r.get("is_executed") else "⚪"
+            if r.get("is_executed"):
+                exec_count += 1
+
+            pnl_str = ""
+            if r["status"] not in ("OPEN", "EXPIRED") and r.get("pnl_pct") is not None:
+                sign    = "+" if r["pnl_pct"] >= 0 else ""
+                pnl_str = f"  {sign}{r['pnl_pct']:.2f}%"
+
+            # Peak extra line for SL and still-OPEN signals
+            peak_str = ""
+            if r.get("peak_price") and r["status"] in ("SL", "OPEN"):
+                ep      = r.get("entry_price", 0) or 0
+                pp      = r["peak_price"]
+                pp_pct  = abs(pp - ep) / ep * 100 if ep else 0
+                tp_tag  = f" ← {r['peak_tp_touched']}" if r.get("peak_tp_touched") else ""
+                peak_str = (
+                    f"\n   ⛰️ Peak: `{pp_pct:+.2f}%`{tp_tag}"
+                )
+
             lines.append(
-                f"\n`#{r['id']}` {sig_icon} `{r['symbol']}` {r['timeframe']}  "
+                f"\n{exec_ic} `#{r['id']}` {sig_icon} `{r['symbol']}` {r['timeframe']}  "
                 f"{st_icon} *{r['status']}*{pnl_str}\n"
                 f"   _Conf {r['confidence']}/10  ·  {r['created_at'][:16]}_"
+                f"{peak_str}"
             )
 
+        lines.append(
+            f"\n{'━'*30}\n"
+            f"🔵 Executed: {exec_count}  ⚪ Observation: {len(rows) - exec_count}"
+        )
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
     # ─────────────────────────────────────────────────────
@@ -639,6 +671,46 @@ class TelegramBot:
             f"{numbered}\n\n"
             f"_Gunakan /topscan untuk scan sekarang_",
             parse_mode="Markdown",
+        )
+
+    # ─────────────────────────────────────────────────────
+    #  /positions  [FEATURE 1]
+    # ─────────────────────────────────────────────────────
+    async def cmd_positions(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._ok(update): return
+        rows = self.db.get_open_signals()
+        msg  = self.reports.positions_message(rows)
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    # ─────────────────────────────────────────────────────
+    #  /execute  /unexecute  [FEATURE 3]
+    # ─────────────────────────────────────────────────────
+    async def cmd_execute(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._ok(update): return
+        if not ctx.args:
+            await update.message.reply_text("Usage: /execute SIGNAL_ID"); return
+        try:
+            sid = int(ctx.args[0])
+        except ValueError:
+            await update.message.reply_text("❌ Invalid signal ID"); return
+
+        self.db.mark_executed(sid, executed=True)
+        await update.message.reply_text(
+            f"🔵 Signal *#{sid}* marked as *executed* trade.", parse_mode="Markdown"
+        )
+
+    async def cmd_unexecute(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._ok(update): return
+        if not ctx.args:
+            await update.message.reply_text("Usage: /unexecute SIGNAL_ID"); return
+        try:
+            sid = int(ctx.args[0])
+        except ValueError:
+            await update.message.reply_text("❌ Invalid signal ID"); return
+
+        self.db.mark_executed(sid, executed=False)
+        await update.message.reply_text(
+            f"⚪ Signal *#{sid}* marked as *observation only*.", parse_mode="Markdown"
         )
 
     # ─────────────────────────────────────────────────────

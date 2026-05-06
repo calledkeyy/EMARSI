@@ -7,6 +7,44 @@ dan proyek ini menggunakan [Semantic Versioning](https://semver.org/lang/id/).
 
 ---
 
+## [1.4.0] — 2026-05-06
+
+### Added — Fitur 1: `/positions` Command
+- `reports.py` — method baru `positions_message(rows: list) -> str`:
+  - Tampilkan semua sinyal OPEN dengan entry, SL, TP1/TP2/TP3 beserta label R:R
+  - Ikon `🔵` = executed trade, `⚪` = observation only
+  - Tanda `✅` pada TP level yang sudah tercapai
+  - Baris peak (`⛰️`) jika sudah ada peak_price di DB
+  - Age sinyal (jam:menit sejak dibuat)
+- `telegram_handler.py` — command `/positions`: fetch open signals, render `positions_message()`
+
+### Added — Fitur 2: Format R:R di Signal Message
+- `reports.py` — konstanta `DEFAULT_R_PCT = 1.5` dan helper `_pct_to_r(pct) -> str`
+- `reports.py` — `signal_message()` ubah format SL/TP menjadi: `→ -1R`, `→ +1.0R`, `→ +2.0R`, `→ +3.0R  ← full close order`
+- `reports.py` — `weekly_report()` dan `monthly_report()` tambah anotasi `(~±xR)` di avg/best/worst
+
+### Added — Fitur 3: Flag Executed / Observation
+- `database.py` — kolom `is_executed INTEGER DEFAULT 0` di tabel signals (auto-migrate)
+- `database.py` — `mark_executed(signal_id, executed=True, year, month)`
+- `telegram_handler.py` — command `/execute ID`: tandai sinyal sebagai executed trade
+- `telegram_handler.py` — command `/unexecute ID`: kembalikan ke observation only
+- `telegram_handler.py` — `/history` tampilkan ikon `🔵`/`⚪` dan summary executed vs observation
+
+### Added — Fitur 4: Backtick Formatting Indikator
+- `reports.py` — `signal_message()` semua nilai indikator pakai backtick: RSI, MACD Hist, ADX, BB Pos, EMA, Momentum, ATR, OI change, funding rate, volume ratio
+- Volume anomaly: `\`4.2x avg\`` → 🔴 *Extreme Selling* CVD: `\`Bearish\`` `\`3\`` candles
+
+### Added — Fitur 5: Peak Profit Tracking sebelum SL
+- `database.py` — kolom `peak_price REAL`, `peak_tp_touched TEXT` di tabel signals (auto-migrate)
+- `database.py` — `update_peak(signal_id, peak_price, peak_tp, year, month)`
+- `database.py` — `get_peak_analysis(date_from, date_to) -> Dict`
+- `scheduler.py` — `_check_open_signals()` update peak setiap 30 detik jika harga lebih menguntungkan
+- `reports.py` — `sl_alert()` terima param `peak_price`, `peak_tp_touched`, `entry_price` dan tampilkan baris `⛰️ Peak`
+- `reports.py` — `_peak_analysis_block(date_from, date_to)`: blok statistik peak untuk laporan
+- `reports.py` — `daily_report()`, `weekly_report()`, `monthly_report()` sertakan peak analysis block
+
+---
+
 ## [1.3.0] — 2026-05-06
 
 ### Added — Fitur 3: Volume Anomaly Detector

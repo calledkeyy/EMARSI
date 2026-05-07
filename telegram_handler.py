@@ -25,6 +25,7 @@ from database import DatabaseManager
 from fetcher import BinanceFetcher
 from signals import calculate_signal
 from reports import ReportGenerator, SIGNAL_PARSE_MODE, DEFAULT_PARSE_MODE
+from trader import BinanceTrader
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ class TelegramBot:
         self.db        = db
         self.fetcher   = BinanceFetcher()
         self.reports   = ReportGenerator(db)
+        self.trader    = BinanceTrader()
         self.scheduler = scheduler
         self.app: Optional[Application] = None
 
@@ -67,13 +69,16 @@ class TelegramBot:
             ("status",      self.cmd_status),
             ("pause",       self.cmd_pause),
             ("resume",      self.cmd_resume),
-            ("close",       self.cmd_close),
+            ("close",       self.cmd_close_trade),
             ("history",     self.cmd_history),
             ("topscan",     self.cmd_topscan),
             ("toplist",     self.cmd_toplist),
-            ("positions",   self.cmd_positions),
+            ("positions",   self.cmd_trade_positions),
             ("execute",     self.cmd_execute),
             ("unexecute",   self.cmd_unexecute),
+            ("balance",     self.cmd_balance),
+            ("closeall",    self.cmd_closeall),
+            ("setrisk",     self.cmd_setrisk),
         ]
         for name, handler in cmds:
             self.app.add_handler(CommandHandler(name, handler))
@@ -711,6 +716,191 @@ class TelegramBot:
         self.db.mark_executed(sid, executed=False)
         await update.message.reply_text(
             f"⚪ Signal *#{sid}* marked as *observation only*.", parse_mode="Markdown"
+        )
+
+    # ─────────────────────────────────────────────────────
+    #  /balance — saldo wallet Binance Demo
+    # ─────────────────────────────────────────────────────
+    async def cmd_balance(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._ok(update):
+            return
+        wallet_total, wallet_avail = await self.trader.get_wallet_balance()
+        trades = self.db.get_all_open_trades()
+        margin_in_use = sum(
+            t["qty"] * t["entry_price"] / t["leverage"]
+            for t in trades
+        )
+        risk_usd = float(self.db.get_config("trade_risk_usd", "5.0"))
+        await update.message.reply_text(
+            f"💰 *Binance Demo Wallet*\n\n"
+            f"Total balance : `${wallet_total:,.2f}`\n"
+            f"Available     : `${wallet_avail:,.2f}`\n"
+            f"Margin in use : `${margin_in_use:,.2f}` ({len(trades)} posisi)\n\n"
+            f"⚙️ Risk per trade : `${risk_usd:.2f}`\n"
+            f"⚙️ Leverage       : `20x`",
+            parse_mode="Markdown",
+        )
+
+    # ─────────────────────────────────────────────────────
+    #  /positions — posisi aktif Binance Demo
+    # ─────────────────────────────────────────────────────
+    async def cmd_trade_positions(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._ok(update):
+            return
+        trades = self.db.get_all_open_trades()
+        if not trades:
+            await update.message.reply_text("🔭 Tidak ada posisi aktif di Binance Demo.")
+            return
+
+        all_prices = await self.fetcher.get_all_prices()
+
+        lines = ["📊 *Posisi Aktif Binance Demo*\n"]
+        for t in trades:
+            symbol = t["symbol"]
+            side   = t["side"]
+            qty    = t["qty"]
+            entry  = t["entry_price"]
+            sl     = t["sl_price"]
+            tp3    = t["tp3_price"]
+            lev    = t["leverage"]
+            count  = t["avg_count"]
+            mark   = all_prices.get(symbol, 0.0)
+
+            if mark > 0:
+                pnl_usd = qty * (mark - entry) * (1 if side == "LONG" else -1)
+                pnl_pct = (mark - entry) / entry * 100 * (1 if side == "LONG" else -1)
+                pnl_icon = "🟢" if pnl_usd >= 0 else "🔴"
+                pnl_str = f"{pnl_icon} PnL: `${pnl_usd:+.2f}` ({pnl_pct:+.2f}%)"
+            else:
+                pnl_str = "PnL: `-`"
+
+            avg_label = f" (avg ×{count})" if count > 1 else ""
+            lines.append(
+                f"*{symbol}* {side}{avg_label}\n"
+                f"Entry: `${entry:,.4f}` | Mark: `${mark:,.4f}`\n"
+                f"Qty: `{qty}` | Lev: `{lev}x`\n"
+                f"SL: `${sl:,.4f}` | TP3: `${tp3:,.4f}`\n"
+                f"{pnl_str}\n"
+            )
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    # ─────────────────────────────────────────────────────
+    #  /close SYMBOL — tutup posisi Binance Demo
+    # ─────────────────────────────────────────────────────
+    async def cmd_close_trade(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._ok(update):
+            return
+        if not ctx.args:
+            await update.message.reply_text(
+                "Usage: `/close BTCUSDT`", parse_mode="Markdown"
+            )
+            return
+
+        symbol = ctx.args[0].upper().strip()
+        if not symbol.endswith("USDT"):
+            symbol += "USDT"
+        trade = self.db.get_open_trade(symbol)
+        if not trade:
+            await update.message.reply_text(
+                f"❌ Tidak ada posisi aktif untuk *{symbol}*",
+                parse_mode="Markdown",
+            )
+            return
+
+        await update.message.reply_text(f"⏳ Menutup posisi {trade['side']} {symbol}…")
+        result = await self.trader.close_position(
+            symbol=symbol,
+            side=trade["side"],
+            qty=trade["qty"],
+            sl_order_id=trade.get("sl_order_id"),
+            tp_order_id=trade.get("tp_order_id"),
+        )
+        if result:
+            self.db.delete_trade(symbol)
+            mark  = float(result.get("avgPrice", 0) or result.get("price", 0))
+            entry = trade["entry_price"]
+            qty   = trade["qty"]
+            pnl_str = ""
+            if mark > 0 and entry > 0:
+                pnl = qty * (mark - entry) * (1 if trade["side"] == "LONG" else -1)
+                pnl_str = f"\nRealized PnL: `${pnl:+.2f}`"
+            await update.message.reply_text(
+                f"✅ *Posisi {symbol} ditutup*\n"
+                f"Side: {trade['side']} | Qty: `{trade['qty']}`"
+                f"{pnl_str}",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ Gagal menutup posisi {symbol}. Cek log untuk detail."
+            )
+
+    # ─────────────────────────────────────────────────────
+    #  /closeall — tutup semua posisi (emergency)
+    # ─────────────────────────────────────────────────────
+    async def cmd_closeall(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._ok(update):
+            return
+        trades = self.db.get_all_open_trades()
+        if not trades:
+            await update.message.reply_text("🔭 Tidak ada posisi aktif.")
+            return
+
+        await update.message.reply_text(f"⏳ Menutup {len(trades)} posisi…")
+        closed, failed = 0, 0
+        for trade in trades:
+            result = await self.trader.close_position(
+                symbol=trade["symbol"],
+                side=trade["side"],
+                qty=trade["qty"],
+                sl_order_id=trade.get("sl_order_id"),
+                tp_order_id=trade.get("tp_order_id"),
+            )
+            if result:
+                self.db.delete_trade(trade["symbol"])
+                closed += 1
+            else:
+                failed += 1
+            await asyncio.sleep(0.3)
+
+        icon = "✅" if failed == 0 else "⚠️"
+        await update.message.reply_text(
+            f"{icon} Close all selesai.\nBerhasil: {closed} | Gagal: {failed}"
+        )
+
+    # ─────────────────────────────────────────────────────
+    #  /setrisk N — ubah risk per trade (USD)
+    # ─────────────────────────────────────────────────────
+    async def cmd_setrisk(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._ok(update):
+            return
+        if not ctx.args:
+            current = self.db.get_config("trade_risk_usd", "5.0")
+            await update.message.reply_text(
+                f"💡 Risk per trade saat ini: `${current}`\n"
+                f"Usage: `/setrisk 10` (dalam USD)",
+                parse_mode="Markdown",
+            )
+            return
+
+        try:
+            new_risk = float(ctx.args[0])
+            if new_risk <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Nilai risk harus angka positif. Contoh: `/setrisk 10`",
+                parse_mode="Markdown",
+            )
+            return
+
+        self.db.set_config("trade_risk_usd", str(new_risk))
+        await update.message.reply_text(
+            f"✅ Risk per trade diubah ke `${new_risk:.2f}`\n"
+            f"Berlaku untuk semua sinyal berikutnya.\n"
+            f"_(Posisi yang sudah terbuka tidak terpengaruh)_",
+            parse_mode="Markdown",
         )
 
     # ─────────────────────────────────────────────────────

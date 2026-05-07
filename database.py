@@ -96,6 +96,24 @@ class DatabaseManager:
                     rank       INTEGER,
                     fetched_at TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS trades (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol      TEXT NOT NULL UNIQUE,
+                    side        TEXT NOT NULL,
+                    qty         REAL NOT NULL,
+                    entry_price REAL NOT NULL,
+                    sl_price    REAL NOT NULL,
+                    tp3_price   REAL NOT NULL,
+                    risk_usd    REAL NOT NULL,
+                    leverage    INTEGER NOT NULL,
+                    sl_order_id INTEGER,
+                    tp_order_id INTEGER,
+                    avg_count   INTEGER DEFAULT 1,
+                    signal_ids  TEXT DEFAULT '',
+                    opened_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
             """)
             defaults = {
                 "default_timeframe":   "15m",
@@ -106,6 +124,8 @@ class DatabaseManager:
                 "notify_lean":         "false",
                 "leverage_suggestion": "5",
                 "risk_per_trade_pct":  "1",
+                "trade_risk_usd":      "5.0",
+                "trade_min_confidence": "7",
             }
             c.executemany(
                 "INSERT OR IGNORE INTO config(key,value) VALUES(?,?)",
@@ -435,6 +455,96 @@ class DatabaseManager:
                 INSERT OR REPLACE INTO config(key,value,updated_at)
                 VALUES(?,?,CURRENT_TIMESTAMP)
             """, (key, value))
+
+    # ─────────────────────────────────────────────────────
+    #  Trades (Binance Demo active positions)
+    # ─────────────────────────────────────────────────────
+    def save_trade(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        entry_price: float,
+        sl_price: float,
+        tp3_price: float,
+        risk_usd: float,
+        leverage: int,
+        sl_order_id: int | None = None,
+        tp_order_id: int | None = None,
+        signal_id: int | None = None,
+    ) -> int:
+        sig_ids = str(signal_id) if signal_id else ""
+        with _conn(self.config_db) as c:
+            cur = c.execute("""
+                INSERT INTO trades
+                    (symbol, side, qty, entry_price, sl_price, tp3_price,
+                     risk_usd, leverage, sl_order_id, tp_order_id, avg_count, signal_ids)
+                VALUES (?,?,?,?,?,?,?,?,?,?,1,?)
+            """, (symbol, side, qty, entry_price, sl_price, tp3_price,
+                  risk_usd, leverage, sl_order_id, tp_order_id, sig_ids))
+            return cur.lastrowid
+
+    def get_open_trade(self, symbol: str) -> dict | None:
+        with _conn(self.config_db) as c:
+            row = c.execute(
+                "SELECT * FROM trades WHERE symbol=?", (symbol,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_all_open_trades(self) -> List[Dict]:
+        with _conn(self.config_db) as c:
+            rows = c.execute(
+                "SELECT * FROM trades ORDER BY opened_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_trade_average(
+        self,
+        symbol: str,
+        new_qty: float,
+        new_entry_price: float,
+        new_tp3_price: float,
+        new_tp_order_id: int | None = None,
+        signal_id: int | None = None,
+    ) -> None:
+        with _conn(self.config_db) as c:
+            row = c.execute(
+                "SELECT avg_count, signal_ids FROM trades WHERE symbol=?", (symbol,)
+            ).fetchone()
+            if not row:
+                return
+            count   = (row["avg_count"] or 1) + 1
+            sig_ids = row["signal_ids"] or ""
+            if signal_id:
+                sig_ids = f"{sig_ids},{signal_id}".strip(",")
+            c.execute("""
+                UPDATE trades
+                SET qty=?, entry_price=?, tp3_price=?,
+                    tp_order_id=COALESCE(?,tp_order_id),
+                    avg_count=?, signal_ids=?,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE symbol=?
+            """, (new_qty, new_entry_price, new_tp3_price,
+                  new_tp_order_id, count, sig_ids, symbol))
+
+    def update_trade_orders(
+        self,
+        symbol: str,
+        sl_order_id: int | None = None,
+        tp_order_id: int | None = None,
+    ) -> None:
+        with _conn(self.config_db) as c:
+            c.execute("""
+                UPDATE trades
+                SET sl_order_id=COALESCE(?,sl_order_id),
+                    tp_order_id=COALESCE(?,tp_order_id),
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE symbol=?
+            """, (sl_order_id, tp_order_id, symbol))
+
+    def delete_trade(self, symbol: str) -> None:
+        with _conn(self.config_db) as c:
+            c.execute("DELETE FROM trades WHERE symbol=?", (symbol,))
 
     # ─────────────────────────────────────────────────────
     #  Watchlist

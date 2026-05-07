@@ -7,6 +7,51 @@ dan proyek ini menggunakan [Semantic Versioning](https://semver.org/lang/id/).
 
 ---
 
+## [1.6.0] — 2026-05-07
+
+### Added — Binance Demo Auto-Trade Integration
+
+#### `trader.py` (baru)
+- `BinanceTrader` class — async HTTP client untuk Binance Demo API (`https://demo-fapi.binance.com`)
+- HMAC-SHA256 request signing otomatis
+- `get_wallet_balance()` / `get_usdt_balance()` — baca saldo real-time dari `/fapi/v3/account`
+- `get_open_positions()` — posisi aktif di akun Demo
+- `get_symbol_info()` + `_extract_filters()` — ambil `stepSize` dan `qty_precision` dari `exchangeInfo`
+- `calculate_qty_fdr()` — Fixed Dollar Risk sizing: `sl_pct → margin → notional → qty (floor)`
+- `open_position()` — MARKET order + pasang SL & TP3 via `/fapi/v1/algoOrder` (fallback `STOP_MARKET`/`TAKE_PROFIT_MARKET`)
+- `add_to_position()` — averaging: qty add-on dari SL lama, cancel TP lama, pasang TP3 baru
+- `close_position()` — MARKET reduceOnly + cancel semua algo orders
+- Safety guard: skip trade jika `margin_required > availableBalance × 90%`
+- Fallback SL/TP: primary `/fapi/v1/algoOrder` → fallback `/fapi/v1/order` untuk compatibility
+
+#### `config.py`
+- `BINANCE_DEMO_BASE`, `BINANCE_DEMO_API_KEY`, `BINANCE_DEMO_API_SECRET`
+- `AUTO_TRADE_ENABLED`, `TRADE_RISK_USD`, `TRADE_LEVERAGE`, `TRADE_MIN_CONFIDENCE`, `BALANCE_SAFETY_PCT`
+
+#### `database.py`
+- Tabel `trades` di `config.db` — tracking posisi aktif Binance Demo (UNIQUE per symbol)
+- Methods: `save_trade`, `get_open_trade`, `get_all_open_trades`, `update_trade_average`, `update_trade_orders`, `delete_trade`
+- Default config baru: `trade_risk_usd = 5.0`, `trade_min_confidence = 7`
+
+#### `scheduler.py`
+- Inject `BinanceTrader` di `__init__`, close session di `stop()`
+- `_run_full_scan()` — setelah sinyal kuat di-save + broadcast, panggil `_auto_execute(sig, sid)`
+- `_auto_execute()` — logic lengkap: open baru, averaging (side sama), skip (side berlawanan)
+- Notif Telegram untuk setiap outcome: open, averaging, skip balance, skip flip
+
+#### `telegram_handler.py`
+- Inject `BinanceTrader` di `__init__`
+- `/balance` (`cmd_balance`) — total & available balance + margin in use + risk setting
+- `/positions` (`cmd_trade_positions`) — posisi aktif + unrealized PnL real-time (menggantikan signal positions)
+- `/close SYMBOL` (`cmd_close_trade`) — tutup posisi spesifik via market order (menggantikan manual signal close)
+- `/closeall` (`cmd_closeall`) — tutup semua posisi sekaligus (emergency button)
+- `/setrisk N` (`cmd_setrisk`) — ubah `trade_risk_usd` di DB, berlaku langsung tanpa restart
+
+#### `.env.example`
+- Tambah section Binance Demo API: `BINANCE_DEMO_API_KEY`, `BINANCE_DEMO_API_SECRET`, dan auto-trade settings
+
+---
+
 ## [1.5.2] — 2026-05-07
 
 ### Refactored — Simplify review cleanup

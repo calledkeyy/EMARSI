@@ -13,11 +13,13 @@ import logging
 from datetime import datetime
 from typing import TYPE_CHECKING, List, Optional
 
+from config import AUTO_TRADE_ENABLED, TRADE_LEVERAGE
 from database import DatabaseManager
 from fetcher import BinanceFetcher
 from signals import calculate_signal
 from reports import ReportGenerator
 from indicators import calculate_emas
+from trader import BinanceTrader
 
 if TYPE_CHECKING:
     from telegram_handler import TelegramBot
@@ -30,6 +32,7 @@ class BotScheduler:
         self.db       = db
         self.fetcher  = BinanceFetcher()
         self.reports  = ReportGenerator(db)
+        self.trader   = BinanceTrader()
         self.bot: Optional["TelegramBot"] = None   # injected after init
         self._running = False
         self._last_top30_key = ""  # "YYYYMMDDH" — prevents double-fire in same hour
@@ -48,6 +51,7 @@ class BotScheduler:
     async def stop(self) -> None:
         self._running = False
         await self.fetcher.close()
+        await self.trader.close()
 
     # ─────────────────────────────────────────────────────
     #  Auto-scan loop
@@ -109,6 +113,10 @@ class BotScheduler:
                     sid = self.db.save_signal(sig, expiry_h)
                     if self.bot:
                         await self.bot.broadcast_signal(sig, sid)
+
+                    # Auto-execute: hanya sinyal kuat LONG/SHORT, bukan LEAN
+                    if is_strong and AUTO_TRADE_ENABLED:
+                        await self._auto_execute(sig, sid)
 
                 await asyncio.sleep(0.15)   # gentle rate-limit
 
@@ -416,6 +424,131 @@ class BotScheduler:
 
         logger.info("Top30 scan done: %d results", len(results))
         return results
+
+    # ─────────────────────────────────────────────────────
+    #  Auto-execute (Binance Demo)
+    # ─────────────────────────────────────────────────────
+    async def _auto_execute(self, sig, signal_id: int) -> None:
+        """
+        Eksekusi sinyal ke Binance Demo.
+        - Side sama dengan posisi existing → averaging
+        - Side berlawanan → skip (tidak flip otomatis)
+        - Tidak ada posisi → open baru
+        """
+        symbol   = sig.symbol
+        side     = "LONG" if "LONG" in sig.signal_type else "SHORT"
+        risk_usd = float(self.db.get_config("trade_risk_usd", "5.0"))
+        existing = self.db.get_open_trade(symbol)
+
+        try:
+            if existing:
+                if existing["side"] != side:
+                    logger.info(
+                        "SKIP %s %s: ada posisi %s berlawanan — tidak flip otomatis",
+                        side, symbol, existing["side"],
+                    )
+                    if self.bot:
+                        await self.bot.broadcast_text(
+                            f"⚠️ *Skip {symbol}*: sinyal {side} muncul tapi "
+                            f"ada posisi {existing['side']} aktif.\n"
+                            f"Gunakan /close {symbol} untuk menutup manual.",
+                            parse_mode="Markdown",
+                        )
+                    return
+
+                # Posisi sama → averaging
+                logger.info("AVG %s %s (count=%d)", side, symbol, existing["avg_count"])
+                result = await self.trader.add_to_position(
+                    symbol=symbol,
+                    side=side,
+                    current_qty=existing["qty"],
+                    current_entry=existing["entry_price"],
+                    sl_price=existing["sl_price"],
+                    new_tp3_price=sig.tp3_price,
+                    old_tp_order_id=existing["tp_order_id"],
+                    risk_usd=risk_usd,
+                    leverage=existing["leverage"],
+                )
+                if not result:
+                    return
+                if result.get("skipped"):
+                    if self.bot:
+                        await self.bot.broadcast_text(
+                            f"⚠️ *Skip averaging {symbol}*: "
+                            f"margin dibutuhkan ${result['margin_required']:.2f}, "
+                            f"available balance ${result['balance']:.2f}",
+                            parse_mode="Markdown",
+                        )
+                    return
+
+                self.db.update_trade_average(
+                    symbol=symbol,
+                    new_qty=result["new_qty"],
+                    new_entry_price=result["avg_entry"],
+                    new_tp3_price=sig.tp3_price,
+                    new_tp_order_id=result["new_tp_order_id"],
+                    signal_id=signal_id,
+                )
+                if self.bot:
+                    await self.bot.broadcast_text(
+                        f"📊 *Averaging {side} {symbol}* (ke-{existing['avg_count']+1})\n"
+                        f"Entry avg: `${result['avg_entry']:,.4f}`\n"
+                        f"Qty total: `{result['new_qty']}`\n"
+                        f"TP3 baru: `${sig.tp3_price:,.4f}`\n"
+                        f"SL: `${existing['sl_price']:,.4f}` (tidak berubah)\n"
+                        f"Margin add-on: `${result['margin_used']:.2f}`",
+                        parse_mode="Markdown",
+                    )
+
+            else:
+                # Belum ada posisi → open baru
+                result = await self.trader.open_position(
+                    symbol=symbol,
+                    side=side,
+                    sl_price=sig.sl_price,
+                    tp3_price=sig.tp3_price,
+                    risk_usd=risk_usd,
+                )
+                if not result:
+                    return
+                if result.get("skipped"):
+                    if self.bot:
+                        await self.bot.broadcast_text(
+                            f"⚠️ *Skip {symbol} {side}*: "
+                            f"margin dibutuhkan ${result['margin_required']:.2f}, "
+                            f"available balance ${result['balance']:.2f}",
+                            parse_mode="Markdown",
+                        )
+                    return
+
+                self.db.save_trade(
+                    symbol=symbol,
+                    side=side,
+                    qty=result["qty"],
+                    entry_price=result["entry_price"],
+                    sl_price=sig.sl_price,
+                    tp3_price=sig.tp3_price,
+                    risk_usd=risk_usd,
+                    leverage=TRADE_LEVERAGE,
+                    sl_order_id=result["sl_order_id"],
+                    tp_order_id=result["tp_order_id"],
+                    signal_id=signal_id,
+                )
+                sl_pct = abs(result["entry_price"] - sig.sl_price) / result["entry_price"] * 100
+                if self.bot:
+                    await self.bot.broadcast_text(
+                        f"✅ *Posisi dibuka: {side} {symbol}*\n"
+                        f"Entry: `${result['entry_price']:,.4f}`\n"
+                        f"Qty: `{result['qty']}`\n"
+                        f"SL: `${sig.sl_price:,.4f}` ({sl_pct:.2f}%)\n"
+                        f"TP3: `${sig.tp3_price:,.4f}`\n"
+                        f"Margin: `${result['margin_used']:.2f}` | "
+                        f"Max loss: `${risk_usd:.2f}`",
+                        parse_mode="Markdown",
+                    )
+
+        except Exception as e:
+            logger.exception("Auto-execute error %s: %s", symbol, e)
 
     # ─────────────────────────────────────────────────────
     #  Public — called from Telegram commands

@@ -20,8 +20,21 @@ ALLOWED_CHAT_IDS: list[int] = (
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FILE  = os.getenv("LOG_FILE", "bot.log")
 
-# ── Binance ───────────────────────────────────────────────
+# ── Binance Public API ────────────────────────────────────
 BINANCE_FUTURES_BASE = "https://fapi.binance.com"
+
+# ── Binance Demo Trading API ──────────────────────────────
+# Buat API key di: https://demo.binance.com/my/settings/api-management
+BINANCE_DEMO_BASE       = "https://demo-fapi.binance.com"
+BINANCE_DEMO_API_KEY    = os.getenv("BINANCE_DEMO_API_KEY", "")
+BINANCE_DEMO_API_SECRET = os.getenv("BINANCE_DEMO_API_SECRET", "")
+
+# ── Auto-trade settings ───────────────────────────────────
+AUTO_TRADE_ENABLED   = os.getenv("AUTO_TRADE_ENABLED", "true").lower() == "true"
+TRADE_RISK_USD       = float(os.getenv("TRADE_RISK_USD", "5.0"))
+TRADE_LEVERAGE       = int(os.getenv("TRADE_LEVERAGE", "20"))
+TRADE_MIN_CONFIDENCE = int(os.getenv("TRADE_MIN_CONFIDENCE", "7"))
+BALANCE_SAFETY_PCT   = float(os.getenv("BALANCE_SAFETY_PCT", "0.9"))
 
 # ── Valid timeframes (Binance format) ─────────────────────
 VALID_TIMEFRAMES = [
